@@ -28,16 +28,16 @@ WGS QC pipeline hosted [here](https://github.com/jackhump/WGS-QC-Pipeline)
 
 ## Quantitative Trait Loci (QTLs)
 
-[QTL results per region and sharing with GTEx](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/QTL_results.Rmd)
+[QTL results per region and sharing with GTEx](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_QTL_results.html)
 
-[Colocalisation with ALS GWAS](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_COLOC.Rmd)
+[Colocalisation with ALS GWAS](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_COLOC.html)
 
-[Transcriptome-wide association study - TWAS](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_TWAS.Rmd)
+[Transcriptome-wide association study - TWAS](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_TWAS.html)
 
 ## Gene prioritisation
 
-[C9orf72 and ATXN3](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ATXN3_C9orf72.Rmd)
+[C9orf72 and ATXN3](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ATXN3_C9orf72.html)
 
-[Transcript plots](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_locus_plots.Rmd)
+[Transcript plots](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_locus_plots.html)
 
-[Localising genes to cell-types](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_genes_celltypes.Rmd)
+[Localising genes to cell-types](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_genes_celltypes.html)

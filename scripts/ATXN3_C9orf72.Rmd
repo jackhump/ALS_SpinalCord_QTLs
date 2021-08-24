@@ -1,0 +1,984 @@
+---
+title: "ATXN3 and C9orf72"
+author: "Jack Humphrey"
+date: "`r Sys.Date()`"
+output: 
+  rmarkdown::html_document:
+    theme: spacelab
+    highlight: zenburn
+    code_folding: hide
+    toc: true
+    toc_float: true
+    smooth_scroll: true
+    number_sections: false
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(patchwork)
+
+theme_jh <- function () { 
+    theme_bw(base_size=8, base_family="Helvetica") %+replace% 
+        theme(
+          panel.grid = element_blank(),
+          strip.background = element_blank(),
+          #panel.border = element_blank(),
+          axis.line = element_line(),
+          #text = element_text(color = "black"), 
+          strip.text = element_text(color = "black"),
+          axis.text = element_text(colour = "black"),
+          axis.ticks = element_line(colour = "black"),
+            panel.background  = element_blank(),
+            plot.background = element_rect(fill="white", colour=NA), 
+            legend.background = element_rect(fill="transparent", colour=NA),
+            legend.key = element_rect(fill="transparent", colour=NA), 
+            axis.line.y = element_line(), strip.text.x = element_text(face = "bold", margin = margin(t = 2,r = 0,b = 2,l=0))
+        )
+}
+
+
+process_vcf <- function(vcf, ID = NA){
+  if( !is.na(ID) ){
+      vcf$ID <- ID
+    }
+  out <- vcf %>%
+    select(-CHROM, -POS,-REF, -ALT, -QUAL, -FILTER, -INFO, -FORMAT) %>%
+    tidyr::gather(key = "sample", value = "genotype", -ID) %>%
+    mutate(genotype = str_split_fixed(genotype, ":", 2)[,1] ) %>%
+    mutate(genotype_binary = 
+             case_when(genotype == "0/0" ~ 0,
+                       genotype == "0/1" ~ 1,
+                      genotype == "1/1" ~ 2 ),
+           sample = gsub("\\.", "-", sample)
+    )
+  return(out)
+}
+
+process_junctions <- function(junction_bed, gene){
+  sqtl_loc <- sqtl_junctions %>%
+    filter(gid == gene) 
+  
+  junction_ids <- str_split_fixed(sqtl_loc$ID, ":", 5)[,c(1,2,3)] 
+  sqtl_loc$junction_id <- apply(junction_ids, MAR = 1, FUN = function(x) { paste0(x[1], ":", x[2], "-", x[3])} )
+  
+  sqtl_loc %>%
+    select(-Chr, -start, -end, -gid, -strand, -ID ) %>%
+    tidyr::gather(key = "sample", value = "junction_ratio", -junction_id)
+}
+
+
+
+process_expansionhunter <- function(eh){
+  eh$sample <- str_split_fixed(basename(eh$V1), ".eh.vcf", 3)[,1]
+  genotype <- str_split_fixed(gsub("<STR|>", "", eh$V5), ",", 2)
+  eh$call1 <- as.numeric(genotype[,1])
+  eh$call2 <- as.numeric(genotype[,2])
+  eh$call2[ is.na(eh$call2)] <- 0
+  eh$max_call <- pmax( eh$call1, eh$call2)
+  
+  df <- select(eh, sample, raw = V5, call1, call2, max_call)
+  
+  return(df)
+}
+
+
+```
+
+
+```{r}
+dna_meta <- read_tsv(here::here("metadata/DNA/vcf_samples_metadata.tsv") )
+dna_meta_full <- dna_meta_full <- readxl::read_excel(here::here("metadata/raw_metadata_from_NYGC/ALS Consortium DNA Metadata 20201015 .xlsx")) %>% janitor::clean_names()
+
+rna_meta <- read_tsv(here::here("metadata/RNA/rna_metadata_annotated.tsv"))
+
+
+covariates <- read_tsv(here::here("ALS_SC/ATXN3/LumbarSpinalCord_splicing_peer20.gene.combined_covariates.txt")) %>%
+  gather(key = "sample", value = "value", -ID) %>% 
+  spread(key = ID, value = value)
+
+# expansionHunter calls are using external_sample_id
+# genotype and others are using VCF ID
+
+coloc_res <- read_tsv(here::here("data/QTLs/Nov_2020/results/COLOC/all_COLOC_results_merged_H4_0.5_with_LD.tsv.gz"))
+
+#coloc_res <- read_tsv(here::here("data/COLOC/Nicolas_suggestive/all_COLOC_results_merged_H4_0.5_with_LD.tsv.gz"))
+
+lsp <- filter(coloc_res, QTL == "NYGC_Lumbar_sQTL", QTL_Gene %in% c("C9orf72", "ATXN3")) %>%
+  filter(PP.H4.abf > 0.5)
+lsp
+
+```
+
+# C9orf72 sQTL
+
+```{r}
+sqtl_junctions <- read_tsv(here::here("ALS_SC/ATXN3/LumbarSpinalCord_sQTL_junctions.bed") )
+
+
+
+sample_key <- read_tsv(here::here("ALS_SC/ATXN3/LumbarSpinalCord_sample_key.txt") )
+# 197 samples from 197 donors
+
+# get expansionHunter calls for samples with RNA
+c9_expansion_hunter_rna <- read.table(here::here("ALS_SC/ATXN3/ExpansionHunter_C9orf72_results.txt"), header=FALSE, stringsAsFactors = FALSE)
+# 403 donors with expansionHunter calls
+
+# feb 2021 - 2044 samples with WGS
+c9_expansion_hunter_wgs <- read.table(here::here("ALS_SC/ATXN3/02_2021_C9orf72_ExpansionHunter_results.txt"), header=FALSE, stringsAsFactors = FALSE)
+# 167 samples have maximum c9 repeat length > 30
+
+# VCF for 434 samples
+c9_vcf <- read.table(here::here("ALS_SC/ATXN3/C9_GWAS_SNP_rs3849943.vcf"), header=TRUE, stringsAsFactors = FALSE )
+# R read T as TRUE
+c9_vcf$ALT <- "T"
+
+
+# rs3849943 - reference allele should be T, alternate should be C. C has an allele frequency around 20% worldwide
+
+c9_genotypes <- process_vcf(c9_vcf) %>%
+  select(-genotype_binary)
+
+# fix allele flip here
+c9_code_df <- tibble(
+  genotype = c("1/1", "0/1", "0/0"),
+  genotype_code = factor(c("T/T", "T/C", "C/C"), levels = c("T/T", "T/C", "C/C") ),
+  genotype_binary = c(2,1,0)
+)
+
+c9_genotypes <- left_join(c9_genotypes, c9_code_df, by = "genotype")
+
+c9_junctions <- process_junctions(sqtl_junctions, "ENSG00000147894.15")
+# 11 junctions in 197 samples
+
+#c9_eh_df_rna <- process_expansionhunter(c9_expansion_hunter_rna)
+c9_eh_df<- process_expansionhunter(c9_expansion_hunter_wgs)
+# 2041 calls, only 1 is NA
+
+
+# merge together
+c9_all <- left_join(c9_junctions, c9_genotypes, by = "sample") %>%
+  left_join(c9_eh_df, by = "sample") %>%
+  mutate(genotype_binary = factor(genotype_binary))
+# 2167 rows for 197 samples
+
+# extract top colocalised junction
+# join on QTL covariates for those samples
+c9_sqtl_snp <- c9_all %>% filter(junction_id == "chr9:27567164-27573709") %>%
+  select(sample, junction_ratio, genotype_binary) %>%
+  left_join(covariates, by = "sample") %>%
+  column_to_rownames(var = "sample") %>%
+  mutate(genotype_binary = as.numeric(genotype_binary))
+
+# do linear regression on junction ratio against genotype - a splicing QTL in R!
+summary(lm(junction_ratio ~ genotype_binary, data = c9_sqtl_snp))
+# P = 1e-12
+
+# now add all the same covariates as tensorQTL
+summary(lm(junction_ratio ~ . , data = c9_sqtl_snp))
+# P = 1e-9 
+
+# get residuals
+c9_sqtl_snp_resid <- 
+  c9_all %>% filter(junction_id == "chr9:27567164-27573709") %>%
+  select(sample, junction_ratio) %>%
+  left_join(covariates, by = "sample") %>%
+  column_to_rownames(var = "sample")
+
+c9_sqtl_snp_resid$resid <- resid(lm(junction_ratio ~ . , data = c9_sqtl_snp_resid) )
+## then add back the SNP
+c9_sqtl_snp_resid$genotype_binary <- c9_genotypes$genotype_binary[match(row.names(c9_sqtl_snp_resid), c9_genotypes$sample)]
+
+
+## MAIN FIGURE
+plot_c9_snp_splicing <- 
+  c9_sqtl_snp_resid %>%
+  left_join(c9_code_df, by = "genotype_binary") %>%
+  ggplot(aes(x = genotype_code, y = resid)) + 
+  geom_jitter(aes(colour = genotype_code), width = 0.2, height = 0, size = 1) +
+  geom_boxplot(outlier.color = NA, fill = NA) +
+  labs(y = "Residual splicing ratio", x = "genotype") +
+  #ggpubr::stat_compare_means() +
+  theme_jh() +
+  labs(colour = "rs3849943") +
+  scale_colour_brewer(type = "qual", palette = 2)
+
+plot_c9_snp_splicing
+```
+
+
+Now use C9orf72 expansion repeat
+
+```{r}
+## Get Expansion Calls
+c9_sqtl_repeat <- c9_all %>% filter(junction_id == "chr9:27567164-27573709") %>%
+  select(sample, junction_ratio, max_call) %>%
+  left_join(covariates, by = "sample") %>%
+  column_to_rownames(var = "sample") %>%
+  filter( !is.na(max_call))
+  #mutate(max_call = factor(max_call > 30))
+
+# 139 out of 197 samples have ExpansionHunter genotypes
+
+summary(lm(junction_ratio ~ log(max_call), data = c9_sqtl_repeat))
+# P = 4.81e-06
+summary(lm(junction_ratio ~ . , data = c9_sqtl_repeat))
+# P = 0.005
+
+
+# plot association between repeat length and residualised junction ratio
+c9_sqtl_resid_eh <- c9_sqtl_snp_resid
+
+c9_sqtl_resid_eh$max_call <- c9_sqtl_repeat$max_call[match(row.names(c9_sqtl_resid_eh), row.names(c9_sqtl_repeat) )]
+
+c9_sqtl_resid_eh <- c9_sqtl_resid_eh[ !is.na(c9_sqtl_resid_eh$max_call), ]
+# 139 samples
+
+
+# plot repeat length against residualised splicing - MAIN FIGURE
+plot_c9_repeat_splicing <- 
+  c9_sqtl_resid_eh  %>%
+  rownames_to_column(var = "sample") %>%
+  left_join(rna_meta, by = c("sample" = "external_sample_id") ) %>%
+  left_join( c9_code_df, by = "genotype_binary") %>%
+  ggplot(aes(x = max_call, y = resid)) + 
+  geom_point(aes(colour = genotype_code), size = 1) + 
+  geom_smooth(method = "lm", colour = "black") +
+  labs(x = "C9orf72 repeat length", y = "Residualised Splicing ratio") +
+  ggpubr::stat_cor() +
+  scale_x_continuous(trans='log10', breaks = c(2,5,10,30,100, 500)) +
+  labs(colour = "rs3849943") +
+  theme_jh() +
+  scale_colour_brewer(type = "qual", palette = 2)
+
+
+# colour by disease - for supplement
+c9_sqtl_resid_eh  %>%
+  rownames_to_column(var = "sample") %>%
+  left_join(sample_key, by = c("sample" = "participant_id")) %>%
+  left_join(rna_meta, by = c("sample_id" = "external_sample_id") ) %>%
+  left_join( c9_code_df, by = "genotype_binary") %>%
+  ggplot(aes(x = max_call, y = resid)) + 
+  geom_point(aes(colour = disease), size = 0.8) + 
+  geom_smooth(method = "lm", colour = "black") +
+  labs(x = "C9orf72 repeat length", y = "Residualised Splicing ratio") +
+  ggpubr::stat_cor() +
+  scale_x_continuous(trans='log10', breaks = c(2,5,10,30,100, 500)) +
+  theme_jh()
+
+
+c9_sqtl_resid_eh %>%
+  filter(!is.na(max_call)) %>%
+  ggplot(aes(x = max_call > 100, y = junction_ratio)) + geom_boxplot() + ggpubr::stat_compare_means() +
+  geom_jitter(width = 0.25) +
+  labs(x = "C9 repeat > 30", y = "Splicing ratio") +
+  theme_jh()
+
+ 
+c9_sqtl_resid_eh %>%
+  ggplot(aes(x = max_call, y = resid)) + geom_point() + geom_smooth(method = "lm") +
+  labs(x = "C9orf72 repeat length", y = "Residual splicing ratio")
+
+c9_sqtl_resid_eh %>%
+  filter(!is.na(max_call)) %>%
+  ggplot(aes(x = max_call > 100, y = resid)) + geom_boxplot() + ggpubr::stat_compare_means() +
+  geom_jitter(width = 0.25) +
+  labs(x = "C9 repeat > 100", y = "Residual splicing ratio")
+
+
+c9_sqtl_resid_eh  %>%
+  ggplot(aes(x = genotype_binary, y = max_call)) + geom_point()
+
+chisq.test(table(expansion = c9_sqtl_resid_eh $max_call > 30, genotype = c9_sqtl_resid_eh$genotype_binary))
+
+
+plot_c9_repeat_genotype <- 
+  c9_sqtl_resid_eh  %>%
+  rownames_to_column(var = "sample") %>%
+  #left_join(rna_meta, by = c("sample" = "external_sample_id") ) %>%
+  left_join( c9_code_df, by = "genotype_binary") %>%
+  ggplot(aes(y = max_call, x = genotype_code)) + 
+  geom_jitter(aes(colour = genotype_code), size = 1, width = 0.2, height =0) + 
+    geom_boxplot(outlier.color = NA, fill = NA) +
+  #geom_smooth(method = "lm", colour = "black") +
+  labs(y = "C9orf72 repeat length", x = "genotype") +
+  #ggpubr::stat_cor() +
+  scale_y_continuous(trans='log10', breaks = c(2,5,10,30,100, 500)) +
+  labs(colour = "rs3849943") +
+  theme_jh() +
+  scale_colour_brewer(type = "qual", palette = 2)
+```
+
+
+```{r fig.width = 3, height = 4.5}
+c9_multiplot <- 
+  (plot_c9_snp_splicing +   plot_c9_repeat_genotype ) /
+  plot_c9_repeat_splicing &
+  # theme(axis.ticks.y = element_blank(), 
+  #       axis.text.y = element_blank(), 
+  #       axis.title.y = element_blank(),
+  #       axis.line.y = element_blank() ) &
+   # ylim(-1.6,2.6) 
+ # ) +
+  #plot_layout(nrow = 2, guides = "collect", widths =c(1,2,1)) &
+  guides(colour = FALSE) #&
+  #theme(legend.position = "bottom") &
+  #plot_annotation(title = "rs3849943 - C9orf72 splicing", subtitle = "chr9:27567164-27573709") &
+  #ylim(-1.6,2.6) 
+
+c9_multiplot 
+
+ggsave(plot = c9_multiplot, filename = here::here("ALS_SC/plots/C9orf72_genotype_repeat_plots.pdf"), width = 3, height = 4.5) 
+
+
+
+```
+
+1 out of 60  homozygous ref have expansions
+11 out of 50 are heterozygous
+5 out of 14 homozygous alt have expansions
+
+therefore there's clearly a tagging of the repeat by the SNP and vice versa.
+
+
+C9orf72 repeat length is weakly associated with splicing of the first intron - P = 0.059 (residual ratio)
+
+
+
+```{r}
+
+# plot
+c9_all %>%
+  filter(junction_id == "chr9:27567164-27573709") %>%
+  ggplot(aes(x = genotype_binary, y = junction_ratio)) + geom_boxplot(aes( group = genotype_binary)) +
+  facet_wrap(~junction_id)
+
+c9_all %>%
+  filter(!is.na(max_call)) %>%
+  filter(junction_id == "chr9:27567164-27573709") %>%
+  ggplot(aes(x = genotype_binary, y = junction_ratio)) + 
+  #geom_boxplot(aes( group = max_call > 80), outlier.colour = NA) +
+  geom_jitter(aes(colour = max_call > 80)) +
+  facet_wrap(~junction_id)
+
+
+#chisq.test(table(c9_genotype_eh$genotype_binary, c9_genotype_eh$max_call))
+
+
+c9_all %>%
+  filter(!is.na(max_call)) %>%
+    filter(junction_id == "chr9:27567164-27573709") %>%
+  mutate(genotype_binary = factor(genotype_binary)) %>%
+  ggplot(aes(x = max_call > 80, y = junction_ratio)) + geom_boxplot() +
+  facet_wrap(~junction_id)
+
+c9_all %>%
+  select(sample, genotype_binary, max_call) %>%
+  filter(!is.na(max_call)) %>%
+  distinct() %>%
+  ggplot(aes(x = genotype_binary, y = max_call)) + geom_point()
+
+c9_genotype_eh <- inner_join(c9_genotypes, c9_eh_df, by = "sample")
+
+table(SNP_genotype = c9_genotype_eh$genotype_binary, expansion = c9_genotype_eh$max_call > 80)
+
+
+c9_genotype_eh %>%
+  ggplot(aes(x = genotype_binary, y = max_call)) +
+  geom_jitter(height = 0, width = 0.25)
+
+
+c9_model <- 
+  c9_all %>%
+  filter(!is.na(max_call)) %>%
+    filter(junction_id == "chr9:27567164-27573709")
+
+summary(lm(junction_ratio ~ as.numeric(genotype_binary), data = c9_model))
+
+summary(lm(junction_ratio ~ as.numeric(max_call), data = c9_model))
+
+summary(lm(junction_ratio ~ as.numeric(max_call > 80) + as.numeric(genotype_binary), data = c9_model))
+
+c9_model %>%
+  ggplot(aes( x = max_call > 80, y = junction_ratio)) + geom_boxplot() + ggpubr::stat_compare_means()
+
+```
+
+Yes, the GWAS variant tags the expansion.
+
+However, does the expansion cause the splicing change? Effect is weaker than that of the SNP.
+
+Is there an enrichment in expanded repeat alleles in ALS patients compared to controls? Obviously yes.
+
+```{r}
+nrow(c9_eh_df)
+# 2041 samples have EH run on them
+
+setdiff(c9_eh_df$sample, dna_meta_full$external_sample_id)
+
+c9_eh_meta <- c9_eh_df %>%
+  left_join(dna_meta_full, by = c("sample" = "external_sample_id") ) %>%
+  filter(!is.na(external_subject_id))
+
+dim(c9_eh_meta)
+# 2032 
+
+c9_eh_meta <- c9_eh_meta %>%
+  filter(!duplicated(external_subject_id)) %>%# throw out duplicate donors
+  filter(pct_european >= 0.9) # remove admixed samples - quick and dirty for now until I get full MDS values.
+
+dim(c9_eh_meta)
+# 1773 donors
+
+
+c9_eh_meta <- mutate(c9_eh_meta, disease = case_when( 
+  subject_group_subcategory == "Classical/Typical ALS" ~ "ALS", 
+  subject_group_subcategory == "Classical/Typical ALS, Frontotemporal Dementia (FTD)" ~ "ALS-FTD",
+  grepl("Frontotemporal Dementia", subject_group_subcategory) ~ "FTD",
+  grepl("Non-Neurological Control", subject_group)  ~ "Control",
+  TRUE ~ "Other")
+)
+
+disease_n <- group_by(c9_eh_meta, disease) %>% tally() %>% mutate(disease_n = paste0(disease,"\n(", n, ")") )
+
+disease_n$disease <- factor(disease_n$disease, levels =  c("Control", "ALS",  "ALS-FTD", "FTD", "Other") )
+disease_n$disease_n <- factor(disease_n$disease_n, levels =  disease_n$disease_n[as.numeric(disease_n$disease)])
+
+c9_eh_meta <- left_join(c9_eh_meta, disease_n, by = "disease")
+
+
+
+# expansion size
+c9_dist_plot <- c9_eh_meta %>%
+  filter(disease != "Other") %>%
+  filter(!is.na(disease) )  %>%
+  mutate(disease_n = forcats::fct_rev(disease_n)) %>%
+  ggplot(aes(x = disease_n, y = max_call )) + 
+  geom_violin(fill = NA, colour = "darkorange") + 
+  geom_jitter(height = 0, width = 0.25, size = 0.5) +
+  coord_flip() +
+  scale_y_continuous(trans = 'log10') +
+  geom_hline(yintercept = 30, linetype = 3, colour = "red") + theme_jh() +
+  labs(x = "", y = "C9orf72 expansion max size")
+
+# proportion of group with expansion > 30
+c9_prop_plot <- c9_eh_meta %>% 
+  filter(!is.na(disease) ) %>%  
+  filter(disease != "Other") %>%
+  group_by(disease_n, expand = !is.na(max_call) & max_call > 30) %>% 
+  tally() %>% 
+  pivot_wider(names_from = expand, values_from = n, values_fill = 0, names_prefix = "c9") %>% 
+  mutate(prop = c9TRUE / (c9TRUE + c9FALSE) ) %>% 
+  mutate(prop_label = paste0(signif(prop * 100, 2), "%" ) ) %>%
+  mutate(disease_n = forcats::fct_rev(disease_n)) %>%
+  ggplot(aes(x = disease_n, y = prop)) + 
+  geom_col() + 
+  coord_flip() + 
+  labs(y = "Proportion > 30 repeats", x = "") +
+  theme_jh() +
+  scale_y_continuous(labels = scales::percent, minor_breaks = NULL, breaks = c(0,0.2), limits = c(0,0.4)) +
+  geom_text(aes(label = prop_label ), colour = "black", nudge_y = 0.04, size = 3) 
+
+c9_dist_plot + c9_prop_plot + plot_layout(ncol = 2, widths = c(3,1))
+```
+
+ALS-FTD has highest proportion of individuals with >30 repeats
+
+
+```{r}
+c9_eh_meta %>%
+  filter(!is.na(disease) ) %>%  
+  filter(disease != "Other") %>%
+ # filter(max_call <= 30) %>%
+  group_by(disease, call = max_call > 30) %>% tally() %>%
+  pivot_wider(names_from =call, values_from = n, values_fill = 0, names_prefix = "c9_30_" ) %>%
+  mutate(prop = c9_30_TRUE / (c9_30_TRUE  + c9_30_FALSE) )
+
+# subthreshold effects?
+c9_eh_meta %>%
+  filter(!is.na(disease) ) %>%
+  filter(max_call <= 30) %>%
+  mutate(call_sum = call1 + call2 ) %>%
+  ggplot(aes(x = max_call)) + geom_histogram(aes(group = disease), binwidth = 1) +
+  facet_wrap(~disease_n, scales = "free_y", ncol = 1) +
+  theme_jh() + 
+  labs(x = "C9orf72 repeat length", title = "C8orf72")
+
+c9_eh_meta %>%
+  filter(!is.na(disease) ) %>%
+    mutate(disease_n = forcats::fct_rev(disease_n)) %>%
+  filter(max_call <= 30) %>%
+  mutate(call_sum = call1 + call2 ) %>%
+  ggplot(aes(x = disease_n, y = max_call)) + 
+  coord_flip() +
+  geom_violin(fill = NA, colour = "darkorange") +
+  geom_jitter(width = 0.25, height = 0, size = 0.5) +#geom_histogram(aes(group = disease, fill = disease), binwidth = 1) +
+  ggpubr::stat_compare_means(ref.group = unique(c9_eh_meta$disease_n[c9_eh_meta$disease == "Control"]), label = "p.format", label.y.npc = 0.9, label.x.npc = 0.1 ) + 
+  #facet_wrap(~disease_n, scales = "free_y") +
+  theme_jh() +
+  labs(title = "C9orf72", x = "Disease", y = "Expansion length")
+
+c9_eh_meta %>%
+  filter(!is.na(disease) ) %>%
+  filter(max_call <= 30) %>%
+  group_by(disease, call = max_call > 10) %>% tally() %>%
+  pivot_wider(names_from =call, values_from = n, values_fill = 0, names_prefix = "c9_10_" ) %>%
+  mutate(prop = c9_10_TRUE / (c9_10_TRUE  + c9_10_FALSE) )
+  
+
+```
+
+Yes, ALS and FTD cases are enriched for C9 expansions > 30.
+No difference in proportion of sub-30 expansion lengths between diseases.
+
+
+# ATXN3 sQTL
+
+
+```{r fig.width = 7, fig.height = 5}
+all_meta <- left_join(rna_meta, dna_meta, by = "external_subject_id", suffix = c(".rna", ".dna"))
+disease_meta <- all_meta %>% select(sample = vcf_id, disease)
+
+# get expansionHunter calls
+#a3_expansion_hunter <- read.table(here::here("ALS_SC/a3/ExpansionHunter_a3_results.txt"), header=FALSE, stringsAsFactors = FALSE)
+
+# Feb 2021 - 1877 samples
+a3_expansion_hunter <- read.table(here::here("ALS_SC/ATXN3/02_2021_ATXN3_ExpansionHunter_results.txt"), header=FALSE, stringsAsFactors = FALSE)
+
+
+# VCF
+#a3_vcf <- read.table(here::here("ALS_SC/ATXN3/ATXN3_QTL_SNP_rs10150068.vcf"), header=TRUE, stringsAsFactors = FALSE )
+a3_vcf <- read.table(here::here("ALS_SC/ATXN3/ALS_rs10143310.vcf"), header=TRUE, stringsAsFactors = FALSE )
+a3_qtl_vcf <- read.table(here::here("ALS_SC/ATXN3/ALS_rs200388434.vcf"), header=TRUE, stringsAsFactors = FALSE )
+
+a3_genotypes <- process_vcf(a3_vcf, ID = "rs10143310")
+
+a3_qtl_geno <-  process_vcf(a3_qtl_vcf , ID = "rs200388434")
+# 425 donors
+```
+
+
+```{r}
+# compare GWAS and QTL SNPs
+a3_compare <- left_join(a3_genotypes, a3_qtl_geno, by = c("sample") ) %>%
+  left_join(dna_meta_full, by = c("sample" = "external_sample_id") ) %>%
+  filter(pct_european > 0.9) %>%
+  select(A = genotype_binary.x, B = genotype_binary.y) %>%
+  drop_na()
+```
+
+
+```{r}
+a3_junctions <- process_junctions(sqtl_junctions, "ENSG00000066427.22")
+# 17 junctions
+
+a3_eh_df <- process_expansionhunter(a3_expansion_hunter) %>% left_join(disease_meta, by = "sample")
+# repeats for 2781 donors
+
+# is there any enrichment in a3 length in ALS?
+```
+
+
+```{r}  
+
+# merge together
+a3_all <- left_join(a3_junctions, a3_genotypes, by = "sample") %>%
+  left_join(a3_eh_df, by = "sample") %>%
+  #mutate(genotype_binary) %>%
+  left_join(disease_meta) %>%
+  filter(!is.na(genotype_binary))
+
+# a3_all %>%
+#   filter(!is.na(genotype_binary), junction_id == "chr14:92049814-92050341") %>%
+#     ggplot(aes(x = genotype_binary, y = junction_ratio)) + geom_boxplot(aes( group = genotype_binary)) +
+#   facet_wrap(~junction_id)
+
+# a3_all %>%
+#   filter(!is.na(genotype_binary), junction_id == "chr14:92049814-92050341", !is.na(max_call)) %>%
+#   ggplot(aes(x = max_call, y = junction_ratio)) + geom_point() + ggpubr::stat_cor()
+# 
+
+a3_genotype_eh <- inner_join(a3_genotypes, a3_eh_df, by = "sample") %>%
+  distinct()
+
+# 
+# a3_genotype_eh %>%
+#   filter(!is.na(genotype_binary)) %>%
+#   ggplot(aes(x = max_call) ) +
+#   geom_dotplot(aes(fill = as.factor(genotype_binary)))
+
+a3_snp <- 
+  a3_all %>%
+  filter(!is.na(genotype_binary), junction_id == "chr14:92049814-92050341") %>%
+  select(sample, junction_ratio, genotype_binary) %>%
+  distinct() %>%  
+  left_join(covariates,  by = "sample") %>%
+  column_to_rownames(var = "sample")
+
+a3_code_df <- 
+  tibble(
+    genotype_binary =  c(0,1,2),
+    genotype_code = factor( c("G/G","G/A", "A/A"), levels = c("G/G","G/A", "A/A") )
+  )
+
+a3_sqtl_snp_resid <- 
+  a3_all %>% 
+  filter(junction_id == "chr14:92049814-92050341") %>%
+  select(sample, junction_ratio) %>%
+  distinct() %>%
+  left_join(covariates, by = "sample") %>%
+  column_to_rownames(var = "sample")
+
+a3_sqtl_snp_resid$resid <- resid(lm(junction_ratio ~ . , data = a3_sqtl_snp_resid) )
+
+## then add back the SNP
+a3_sqtl_snp_resid$genotype_binary <- a3_genotypes$genotype_binary[match(row.names(a3_sqtl_snp_resid), a3_genotypes$sample)]
+
+
+
+
+a3_sqtl_snp_resid %>%
+  left_join(a3_code_df, by = "genotype_binary") %>%
+  ggplot(aes(x = genotype_code, y = junction_ratio)) +
+  geom_boxplot(aes(group = genotype_code), outlier.colour = NA) + 
+  geom_jitter(aes(colour = genotype_code), width = 0.25, height = 0)   + 
+  labs(y = "Raw junction ratio", x = "rs10143310", colour = "rs10143310") +
+  theme_jh() +
+  scale_colour_brewer(type = "qual", palette = 2) +
+  ggpubr::stat_compare_means()
+
+## plot residualised junctions against genotype
+plot_a3_sqtl <-   
+  a3_sqtl_snp_resid %>%
+  left_join(a3_code_df, by = "genotype_binary") %>%
+  ggplot(aes(x = genotype_code, y = resid)) +
+  geom_jitter(aes(colour = genotype_code), width = 0.25, height = 0, size = 1)   + 
+  geom_boxplot(aes(group = genotype_code), outlier.colour = NA, fill = NA) + 
+  labs(y = "Residual splicing ratio", x = "rs10143310", colour = "rs10143310") +
+  theme_jh() +
+  scale_colour_brewer(type = "qual", palette = 2)
+
+plot_a3_sqtl
+
+summary(lm(junction_ratio ~ genotype_binary, a3_sqtl_snp_resid ))
+# P = 3e-13
+summary(lm(resid ~ genotype_binary, a3_sqtl_snp_resid ))
+# P  = 1.98e-12
+```
+
+```{r}
+summary(lm( junction_ratio ~ genotype_binary, data = a3_snp))
+# genotype P = 1e-13, R2 = 0.238
+summary(lm( junction_ratio ~ ., data = a3_snp))
+# genotype P = 1e-14, R2 = 0.444
+summary(lm( resid ~ genotype_binary, data =  a3_sqtl_snp_resid))
+# 
+
+a3_repeat <- 
+  a3_all %>%
+  filter(!is.na(max_call), junction_id == "chr14:92049814-92050341") %>%
+  distinct() %>%
+  select(sample, junction_ratio, max_call) %>%
+  left_join(covariates,  by = "sample") %>%
+  column_to_rownames(var = "sample") 
+
+summary(lm( junction_ratio ~ max_call, data = a3_repeat))
+# genotype P = 0.046, R2 = 0.026
+summary(lm( junction_ratio ~ ., data = a3_repeat))
+# genotype P = 0.0273, R2 = 0.285
+
+```
+
+
+```{r}
+
+#  geom_density(aes(group = genotype_binary))
+a3_repeat$resid <- a3_sqtl_snp_resid$resid[match(row.names(a3_repeat), row.names(a3_sqtl_snp_resid) )]
+summary(lm( resid ~ max_call, data = a3_repeat))
+# P = 0.046
+
+a3_repeat_snp <- 
+  a3_all %>%
+  filter(!is.na(max_call), !is.na(genotype_binary), junction_id == "chr14:92049814-92050341") %>%
+  distinct() %>%
+  select(sample, junction_ratio, max_call, genotype_binary) %>%
+  left_join(covariates,  by = "sample") %>%
+  mutate( genotype_binary = as.numeric(genotype_binary)) %>%
+  column_to_rownames(var = "sample")
+
+summary(lm( junction_ratio ~ max_call + genotype_binary, data = a3_repeat_snp))
+summary(lm( junction_ratio ~ ., data = a3_repeat_snp))
+# genotype P = 1e-8
+# repeat P = 0.5
+
+a3_to_plot <- a3_repeat_snp
+
+a3_to_plot$resid <- a3_sqtl_snp_resid$resid[ match(row.names(a3_to_plot), row.names(a3_sqtl_snp_resid) ) ]
+
+plot_repeat_splicing <- 
+  a3_to_plot %>%
+  left_join(a3_code_df, by = "genotype_binary") %>%
+  ggplot(aes(x = max_call, y = resid)) + 
+  geom_point(aes(colour = genotype_code), size = 1) +
+    geom_smooth(method = "lm", colour = "black") +
+  theme_jh() +
+  ggpubr::stat_cor() +
+  scale_colour_brewer(type = "qual", palette = 2)  +
+  labs(y = "Residual splicing ratio", x = "CAG repeat length", colour = "rs10143310") +
+  scale_x_continuous(breaks = c(0,10,20,30), limits = c(0,30)) 
+
+plot_repeat_splicing 
+
+cor.test(a3_repeat_snp$genotype_binary, a3_repeat_snp$max_call)
+chisq.test(table(a3_repeat_snp$genotype_binary, a3_repeat_snp$max_call > 16))
+
+```
+
+
+
+
+```{r fig.width = 3, fig.height = 4.5}
+plot_a3_genotype_repeat <- 
+  a3_repeat_snp %>%
+  left_join(a3_code_df, by = "genotype_binary") %>%
+  ggplot(aes(x = genotype_code, y = max_call) ) + 
+  geom_jitter(aes(colour = genotype_code), width = 0.25, height = 0, size = 1) + 
+  geom_boxplot(outlier.colour = NA, aes(group = genotype_binary), fill = NA) + 
+  scale_y_continuous(breaks = c(0,10,20,30), limits = c(0,30)) +
+  labs(y = "CAG repeat length", x = "rs10143310", colour = "rs10143310") +
+  theme_jh() +
+  scale_colour_brewer(type = "qual", palette = 2)
+
+
+atxn3_multiplot <- 
+  (plot_a3_sqtl +plot_a3_genotype_repeat) /
+     plot_repeat_splicing &
+  theme(axis.ticks = element_line(colour = "black")) &
+       # theme(axis.ticks.y = element_blank(), 
+       #  axis.text.y = element_blank(), 
+       #  axis.title.y = element_blank(),
+       #  axis.line.y = element_blank() ) &
+  guides(colour = FALSE)
+
+atxn3_multiplot
+
+ggsave(plot = atxn3_multiplot, filename = here::here("ALS_SC/plots/ATXN3_genotype_repeat_plots.pdf"), width = 3, 
+       height = 4.5) 
+```
+
+The lead QTL SNP for the ATX3 sQTL is tagging the repeat expansion!
+
+
+Questions:
+
+Does including all the covariates increase the signal? 
+
+If the SNP is tagging the expansion, and the expansion affects splicing, then the expansion should correlate better with the splicing change than the tagging SNP, no?
+
+
+## ATXN3 repeats in the WGS cohort
+
+
+```{r}
+
+## DNA cohort as well
+a3_eh_meta <- a3_eh_df %>%
+  left_join(dna_meta_full, by = c("sample" = "external_sample_id") ) %>%
+  filter(!is.na(external_subject_id)) %>%
+  filter(!duplicated(external_subject_id)) %>%
+  filter(!is.na(max_call))
+  # throw out duplicate donors
+# 1869 unique donors from 2774 samples
+
+a3_eh_meta <- a3_eh_meta %>%
+  filter(pct_european >= 0.9) # remove admixed samples - quick and dirty for now until I get full MDS values.
+# 1634 Europeans
+
+# I can only match metadata for 1559 non-duplicate donors. Time to update metadata? Emailed Nadia and Jennifer
+
+a3_eh_meta <- mutate(a3_eh_meta, disease = case_when( 
+  subject_group_subcategory == "Classical/Typical ALS" ~ "ALS", 
+  subject_group_subcategory == "Classical/Typical ALS, Frontotemporal Dementia (FTD)" ~ "ALS-FTD",
+  grepl("Frontotemporal Dementia", subject_group_subcategory) ~ "FTD",
+  grepl("Non-Neurological Control", subject_group)  ~ "Control",
+  TRUE ~ "Other")
+)
+# 1600 donors
+
+
+disease_n <- group_by(a3_eh_meta, disease) %>% tally() %>% mutate(disease_n = paste0(disease,"\n(", n, ")") )
+
+disease_n$disease <- factor(disease_n$disease, levels =  c("Control", "ALS", "FTD", "ALS-FTD", "Other") )
+disease_n$disease_n <- factor(disease_n$disease_n, levels =  disease_n$disease_n[as.numeric(disease_n$disease)])
+
+a3_eh_meta <- left_join(a3_eh_meta, disease_n, by = "disease")
+
+# a3_eh_meta %>%
+#   filter(!is.na(disease)) %>%
+#   ggplot(aes(x = disease_n, y = max_call)) +  geom_violin(fill = NA) + geom_jitter(width = 0.25, height = 0, size = 0.5, colour = "gray") +
+#   #coord_flip() +
+#   ggpubr::stat_compare_means(ref.group = disease_n$disease_n[2]) +
+#   theme_jh() + labs(y ="Max repeat length", title = "ATXN3", x = "")
+# 
+# 
+# a3_eh_meta %>%
+#  # filter(disease %in% c("ALS", "Control")) %>%
+#   ggplot(aes(x = call1 + call2 ) ) + geom_histogram(aes(fill = disease), binwidth = 1) +
+#   facet_wrap(~disease, scales = "free_y", nrow = 4)
+a3_threshold <- 16
+
+a3_dist_plot <- 
+  a3_eh_meta %>%
+  filter(disease %in% c("ALS", "Control")) %>%
+  filter(!is.na(disease) )  %>%
+  mutate(disease_n = forcats::fct_rev(disease_n)) %>%
+  ggplot(aes(x = disease_n, y = max_call )) + 
+  geom_violin(fill = NA, colour = "darkorange") + 
+  geom_jitter(height = 0, width = 0.25, size = 0.5) +
+  coord_flip() +
+  geom_hline(yintercept = a3_threshold, linetype = 3, colour = "red") + theme_jh() +
+  labs(x = "", y = "ATXN3 expansion max size")
+
+# proportion of group with expansion > 16
+a3_prop_plot <- a3_eh_meta %>% filter(!is.na(disease) ) %>% 
+    filter(disease %in% c("ALS", "Control")) %>%
+  group_by(disease_n, expand = !is.na(max_call) & max_call > a3_threshold) %>% 
+  tally() %>% 
+  pivot_wider(names_from = expand, values_from = n, values_fill = 0, names_prefix = "a3") %>% 
+  mutate(prop = a3TRUE / (a3TRUE + a3FALSE) ) %>% 
+  mutate(prop_label = paste0(signif(prop * 100, 2), "%" ) ) %>%
+  mutate(disease_n = forcats::fct_rev(disease_n)) %>%
+  ggplot(aes(x = disease_n, y = prop)) + 
+  geom_col() + 
+  coord_flip() + 
+  labs(y = "Proportion > 16 repeats", x = "") +
+  theme_jh() +
+  scale_y_continuous(labels = scales::percent, minor_breaks = NULL, breaks = c(0,0.2), limits = c(0,0.25)) +
+  geom_text(aes(label = prop_label ), colour = "black", nudge_y = 0.04, size = 3) 
+
+# proportion European in each sample by disease
+# FTD slightly higher distribution - almost all from UK, less diverse than other diease groups
+a3_eh_meta %>%
+  ggplot(aes(x = disease, y = as.numeric(pct_european) )) + geom_jitter() + geom_violin(fill = NA) + theme_jh() +
+  ggpubr::stat_compare_means(ref.group = "Control")
+
+# table
+a3_eh_meta %>%
+  filter(!is.na(disease) ) %>%
+ # filter(max_call <= 30) %>%
+  group_by(disease, call = max_call > 15) %>% tally() %>%
+  pivot_wider(names_from =call, values_from = n, values_fill = 0, names_prefix = "a3_30_" ) %>%
+  mutate(prop = a3_30_TRUE / (a3_30_TRUE  + a3_30_FALSE) )
+
+
+a3_bar_plot <- a3_eh_meta %>%
+  filter(disease %in% c("ALS", "Control")) %>%
+  filter(!is.na(disease) ) %>%
+  #filter(max_call <= 30) %>%
+  #mutate(call_sum = call1 + call2 ) %>%
+  ggplot(aes(x = max_call)) + geom_histogram(aes(group = disease), binwidth = 1) +
+  facet_wrap(~disease_n, scales = "free_y", ncol = 1) +
+  theme_jh() + 
+  labs(x = "ATXN3 repeat length", title = "ATXN3")
+
+a3_dist_plot + a3_bar_plot + plot_layout(ncol = 2, widths = c(1,1))
+
+# tally 
+a3_tally <- a3_eh_meta %>%
+  filter(disease %in% c("Control", "ALS") ) %>%
+  group_by(disease, max_call) %>% tally() %>%
+  pivot_wider(names_from =disease, values_from = n, values_fill = 0 ) 
+
+a3_tally$ALS_sum <- sum(a3_tally$ALS)
+a3_tally$Control_sum <- sum(a3_tally$Control)
+
+a3_tally$ALS_prop <- a3_tally$ALS / a3_tally$ALS_sum
+a3_tally$Control_prop <- a3_tally$Control / a3_tally$Control_sum
+
+a3_tally$p.value <- map_dbl(1:nrow(a3_tally), ~{
+  print(.x)
+  .x <- a3_tally[.x,]
+  prop.test(x = c(.x[,2, drop = TRUE], .x[,3, drop = TRUE]), n = c(.x[,4, drop = TRUE], .x[,5, drop = TRUE]))$p.value
+})
+a3_tally$padj <- p.adjust(a3_tally$p.value, method = "bonferroni")
+
+plot_atxn3_eh_tally <-
+  a3_tally %>%
+  filter(max_call > 15 & max_call < 30) %>%
+  select(max_call, Control_prop, ALS_prop, p.value, padj) %>%
+  pivot_longer(cols = Control_prop:ALS_prop, values_to = "prop", names_to = "disease" ) %>%
+  mutate(disease = gsub("_prop", "", disease)) %>%
+  left_join(disease_n, by = "disease") %>%
+  ggplot(aes(x = max_call, y = prop)) + geom_col(aes(fill = disease_n), position = position_dodge(), width = 0.75 ) +
+  theme_jh() +
+  labs(x = "Maximum ATXN3 repeat length", y = "Proportion of group", fill = "Group") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0,0.26), expand = c(0,0)) +
+  geom_hline(yintercept = 0) +
+  geom_text(aes(label = signif(p.value, 2), y = 0.25 ), size =2 ) 
+
+
+ggsave(plot = plot_atxn3_eh_tally,  filename = here::here("ALS_SC/plots/ATXN3_WGS_EH_tally.pdf"), width =6, height = 3 )
+
+# threshold at 16
+a3_eh_meta %>%
+  filter(disease %in% c("Control", "ALS") ) %>%
+  group_by(disease, call = max_call >= 21) %>% tally() %>%
+  pivot_wider(names_from =call, values_from = n, values_fill = 0, names_prefix = "a3_" ) %>%
+  mutate(n = a3_FALSE + a3_TRUE) %>%
+  mutate(prop = a3_TRUE / (a3_TRUE  + a3_FALSE) ) %>%
+  mutate(p.value = prop.test(x = .$a3_TRUE, n = .$n)$p.value  )
+
+prop.test(x = c(314, 53), n = c(sum(a3_tally$ALS), sum(a3_tally$Control))  )
+# P = 0.36
+```
+
+Compare with ATXN2
+
+```{r}
+a2_eh_meta <- a3_eh_meta
+
+max_atxn2 <- function(x){
+  df <- str_split_fixed(x, "/", 2)
+  lengths <- as.numeric(apply(df, MARGIN = 1, max))
+  return(lengths)
+}
+a2_eh_meta$atxn2_max <-  max_atxn2(a2_eh_meta$atxn2_repeat_size)
+
+a2_tally <- a2_eh_meta %>%
+  filter(disease %in% c("Control", "ALS") ) %>%
+  group_by(disease, atxn2_max) %>% tally() %>%
+  pivot_wider(names_from =disease, values_from = n, values_fill = 0 ) %>%
+  arrange(atxn2_max)
+
+a2_tally$ALS_sum <- sum(a2_tally$ALS)
+a2_tally$Control_sum <- sum(a2_tally$Control)
+
+a2_tally$ALS_prop <- a2_tally$ALS / a2_tally$ALS_sum
+a2_tally$Control_prop <- a2_tally$Control / a2_tally$Control_sum
+
+a2_tally$p.value <- map_dbl(1:nrow(a2_tally), ~{
+  print(.x)
+  .x <- a2_tally[.x,]
+  prop.test(x = c(.x[,2, drop = TRUE], .x[,3, drop = TRUE]), n = c(.x[,4, drop = TRUE], .x[,5, drop = TRUE]))$p.value
+})
+a2_tally$padj <- p.adjust(a2_tally$p.value, method = "bonferroni")
+
+a2_tally %>%
+  filter(atxn2_max > 24 & atxn2_max < 34 ) %>%
+  select(atxn2_max, Control_prop, ALS_prop, p.value, padj) %>%
+  pivot_longer(cols = Control_prop:ALS_prop, values_to = "prop", names_to = "disease" ) %>%
+  mutate(disease = gsub("_prop", "", disease)) %>%
+  left_join(disease_n, by = "disease") %>%
+  ggplot(aes(x = atxn2_max, y = prop)) + geom_col(aes(fill = disease_n), position = position_dodge(), width = 0.75 ) +
+  theme_jh() +
+  labs(title = "ATXN2", x = "repeat length") +
+  scale_y_continuous(labels = scales::percent) +
+  geom_hline(yintercept = 0) +
+  geom_text(aes(label = signif(p.value, 2), y = 0.2 ) )
+
+
+
+```
+  

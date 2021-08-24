@@ -1,0 +1,566 @@
+---
+title: "ALS - setup and covariate modelling"
+author: |
+  | Jack Humphrey
+  | Raj Lab
+  | Department of Neuroscience
+  | Icahn School of Medicine at Mount Sinai
+  | NYC, New York
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: haddock
+   code_folding: hide
+   toc: true
+   toc_float: true
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.height = 10, fig.width = 10)
+library(tidyverse)
+library(ggfortify)
+library(patchwork)
+library(pheatmap)
+library(variancePartition)
+library(limma)
+library(edgeR)
+library(gt)
+library(ggplotify)
+
+#library(ComplexHeatmap)
+#library(tidyHeatmap)
+
+library(doParallel)
+cl <- makeCluster(4)
+registerDoParallel(cl)
+
+theme_jh <- function () { 
+    theme_bw(base_size=10, base_family="Avenir") %+replace% 
+        theme(
+          panel.grid = element_blank(),
+          strip.background = element_blank(),
+          #panel.border = element_blank(),
+          axis.line = element_line(),
+          #text = element_text(color = "black"), 
+          strip.text = element_text(color = "black"),
+          axis.text = element_text(colour = "black"),
+            panel.background  = element_blank(),
+            plot.background = element_rect(fill="white", colour=NA), 
+            legend.background = element_rect(fill="transparent", colour=NA),
+            legend.key = element_rect(fill="transparent", colour=NA), 
+            axis.line.y = element_line(), strip.text.x = element_text(face = "bold", margin = margin(t = 2,r = 0,b = 2,l=0))
+        )
+}
+
+rerun <- FALSE
+```
+
+## Read in metadata
+
+Gene expression
+RNA metadata
+DNA metadata
+
+How many tissues are available for comparing ALS versus Controls?
+
+Remove any sample with RIN < 5
+
+```{r}
+## RNA
+# technical info - from Picard
+rna_tech_df <- read_tsv(here::here("metadata/RNA/rna_technical_metrics.tsv")) %>% 
+  dplyr::rename(sample = external_sample_id) %>%
+  dplyr::select(sample, starts_with('pct'), starts_with('median'), mean_read_length, strand_balance, estimated_library_size)
+
+write_tsv(rna_tech_df, path = here::here("data/differential_expression/ALS/ALS_all_differential_expression_tech_metrics.tsv") )
+
+# metadata - all clincal metadata
+rna_metadata <- read_tsv(here::here("data/nov_2020/201127_rna_metadata_qc_pass.tsv")) %>% 
+  dplyr::rename(sample = "external_sample_id")
+# 1917
+table(rna_metadata$QC_PASS)
+
+## remove QC failed samples from metadata
+# rna_qc_fails <- read_tsv(here::here("metadata/RNA/2020_02_10_RNA_samples_failing_QC.txt"))
+
+
+#all_rna_fails <- c(rna_qc_fails$external_sample_id, new_qc_fails)
+
+rna_metadata <- rna_metadata %>%
+  filter( QC_PASS == TRUE ) %>%
+  mutate(disease_c9 = case_when(
+    disease == "Control" ~ "Control",
+    disease == "ALS" & mutations == "C9orf72" ~ "C9ALS",
+    disease == "ALS" & mutations == "None" ~ "sALS",
+    TRUE ~ "Other"
+))
+# 1879 RNA samples pass QC
+
+# 3 samples have missing RIN - give them the median
+# 7 have missing age
+# 513 have missing PMI - useless
+rna_metadata <- 
+  rna_metadata %>%
+  mutate( rin = replace_na(rin, median(rin, na.rm = TRUE)),
+          age = replace_na(age, median(age, na.rm = TRUE)),
+          pmi = replace_na(pmi, median(pmi, na.rm = TRUE))
+          )
+
+
+## DNA
+# get genetic PCs for each sample
+dna_metadata <- read_tsv(here::here("metadata/DNA/all_samples_DNA_key.tsv"))
+# 1898 unique samples - some donors were sequenced twice -mostly Cerebellum
+# 
+dna_pcs <- read_tsv(here::here("metadata/DNA/all_cohort_genetic_PCs.txt")) %>%
+  select(-external_sample_id, -external_subject_id) %>%
+  rename(participant_id = vcf_id)
+   #gather(key = "participant_id", value = "PC", -ID) %>%
+   #spread( key = ID, value = PC)
+names(dna_pcs)[2:6] <- paste0("g", names(dna_pcs[2:6]))
+# 513 donors
+
+
+dna_metadata <- inner_join(dna_metadata, dna_pcs, by = "participant_id") #%>%
+  #select(-external_subject_id, -external_sample_id)
+# 1894 unique samples with DNA PCs
+
+
+# remove QC fails and any sample without WGS
+# only keep ALS and Control diagnoses
+rna_metadata <- dplyr::filter(rna_metadata, 
+                       disease %in% c("ALS", "Control")
+                       )
+# 1294 samples are in categories
+
+rna_metadata <- 
+  filter(rna_metadata, 
+         sample %in% dna_metadata$sample_id,
+)
+# 1278 have associated DNA 
+
+# create compact support file including all relevant covariates and nothing more
+support <- 
+  left_join(rna_metadata, dna_metadata, by = c("sample" = "sample_id", "tissue") ) %>%
+  dplyr::select(sample, donor = external_subject_id, tissue, site = site_specimen_collected, rin,prep, mutations, disease, disease_c9, motor_onset = site_of_motor_onset, duration = disease_duration_in_months, sex, age, starts_with("gPC")  )
+
+
+
+
+# tissues <- c("Frontal_Cortex", "Lateral_Motor_Cortex", "Medial_Motor_Cortex", "Temporal_Cortex", "Cerebellum", "Lumbar_Spinal_Cord", "Cervical_Spinal_Cord", "Thoracic_Spinal_Cord", "Unspecified_Motor_Cortex")
+
+tissues <- c("Lumbar_Spinal_Cord", "Cervical_Spinal_Cord", "Thoracic_Spinal_Cord")
+
+
+# remove low RIN, only Control or ALS
+support  <- 
+  support %>% 
+  mutate( disease = factor(disease,levels = c("Control", "ALS"))) %>%
+  filter(rin >= 5, tissue %in% tissues) %>%
+  filter( !(tissue == "Unspecified_Motor_Cortex" & site != "Academic Medical Center"))
+# 380 meet all criteria
+
+support$onset <- as.numeric(support$age) - ( as.numeric(support$duration) / 12 )
+
+write_tsv(support, here::here("data/differential_expression/ALS/ALS_all_differential_expression_support.tsv"))
+
+```
+
+remove all samples with RIN < 5 for differential expression.
+
+```{r}
+
+support %>%
+  group_by(tissue, disease) %>% 
+  filter(!duplicated(sample)) %>% # 1 duplicate entry in metadata, CGND-HRA-00431 - unsure how got in
+  tally() %>% 
+  spread(key = disease, value = n, fill = 0) %>% 
+  arrange( desc(Control)) %>% 
+  ungroup() %>% janitor::adorn_totals(where = "row") %>%
+gt::gt()
+
+support %>% 
+  filter(rin >= 5, tissue %in% tissues) %>%
+  mutate( disease_c9 = factor(disease_c9,levels = c("Control", "sALS", "C9ALS"))) %>%
+  group_by(tissue, disease_c9) %>% 
+  filter(!duplicated(sample)) %>% # 1 duplicate entry in metadata, CGND-HRA-00431 - unsure how got in
+  tally() %>% 
+  spread(key = disease_c9, value = n, fill = 0) %>% 
+  arrange( desc(Control)) %>% 
+  ungroup() %>% gt::gt()
+
+support %>%
+  filter( rin >= 5, tissue %in% tissues) %>%
+  select(donor, disease) %>%
+  distinct() %>%
+  group_by(disease) %>% tally()
+
+
+
+
+```
+
+NA refers to other ALS mutations (ANG, SOD1, OPTN)
+
+
+For each tissue, get together all covariates , plus gene expression for those samples
+
+```{r}
+load(here::here("data/feb_2020/gene_counts_no_tags.RData") )
+
+dim(genes_counts)
+
+#support <- filter(rna_metadata, tissue %in% tissues)
+
+
+for( t in tissues){
+  support_loc <- filter(support, tissue == t ) %>% distinct() # any sneaky duplicate rows?
+  counts_loc <- genes_counts[, support_loc$sample] 
+  tpm_loc <- genes_counts[, support_loc$sample]
+  tech_loc <- filter(rna_tech_df, sample %in% support_loc$sample)
+  outFile <- here::here(paste0("data/differential_expression/ALS/", t, ".RData") )
+  if( rerun){
+  save(support_loc, counts_loc, tpm_loc, tech_loc, file = outFile  )
+  }
+}
+
+
+```
+
+
+
+
+# Diagnostic Plots
+
+```{r }
+
+# for testing
+#t <- "Thoracic_Spinal_Cord"
+diagnosticPlots <- function(t,
+                            varpart_formula =  ~ (1|site) + rin + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases + pct_r1_transcript_strand_reads + pct_intergenic_bases +   median_3prime_bias + median_5prime_bias + (1|disease) + (1|prep) + age + (1|sex) ){
+  
+  inFile <- here::here( paste0("data/differential_expression/ALS/", t, ".RData"))
+  stopifnot(file.exists(inFile))
+  load(inFile)
+  
+  row.names(support_loc) <- support_loc$sample
+  row.names(tech_loc) <- tech_loc$sample
+  
+  libsize <- enframe(colSums(counts_loc)) %>% dplyr::rename(sample = name, total_counts = value) 
+  
+  support_loc <- dplyr::left_join(support_loc, libsize, by = 'sample')
+  
+  # Tables
+  
+  # disease by site
+  site_table <- support_loc %>% dplyr::group_by(disease, site) %>% dplyr::tally() %>% tidyr::spread(key = disease, value = n) #%>% ungroup %>% gt() %>% tab_header("Disease group by submitting site")
+  # disease by prep
+  prep_table <- support_loc %>% dplyr::group_by(disease, prep) %>% dplyr::tally() %>% tidyr::spread(key = disease, value = n)# %>% ungroup %>% gt() %>% tab_header("Disease group by library prep type")
+
+  print(site_table)
+  
+  print(prep_table)
+  
+  
+  # genes_counts 
+  isexpr <- rowSums(cpm(counts_loc)>1) >= 0.9 * ncol(counts_loc)
+  # create data structure with only expressed genes
+  gExpr <- DGEList(counts=counts_loc[isexpr,])
+  # Perform TMM normalization
+  gExpr <- calcNormFactors(gExpr)
+  # Specify variables to be included in the voom() estimates of
+  # uncertainty.
+  # Recommend including variables with a small number of categories
+  # that explain a substantial amount of variation
+  #design <- model.matrix(~1)#model.matrix( ~ median_3prime_bias + pct_mrna_bases + disease, all_df)
+  vobjGenes <- voom(gExpr)
+
+  voom_pca <- prcomp(t(vobjGenes$E), center = TRUE, scale.=TRUE)
+  
+  pca_df <- voom_pca$x %>%
+    as.data.frame() %>%
+    rownames_to_column(var = "sample") %>%
+    select(sample, PC1, PC2) %>%
+    left_join(support_loc, by = "sample") %>%
+    left_join(tech_loc, by = "sample")
+  
+  plot_pca_df <- function(colourby){
+    pca_df %>%
+      ggplot(aes(x = PC1, y = PC2)) + 
+      geom_point(aes_string(colour = colourby))
+  }
+    
+  pca_plot <-
+    plot_pca_df("disease") +
+    plot_pca_df("prep") +
+    plot_pca_df("pct_mrna_bases") +
+    plot_pca_df("site") +
+    plot_layout(ncol = 2, nrow = 3) +
+    plot_annotation(title = t) & theme_bw()
+
+  
+  n_pc <- 10
+  
+  expression_pca_df <- voom_pca$x[,1:n_pc] %>%
+    as.data.frame() %>%
+    rownames_to_column(var = "sample")
+  
+  all_df <- 
+    list(expression_pca_df, support_loc, tech_loc) %>%
+    purrr::reduce(dplyr::left_join, by = "sample") %>%
+    dplyr::select(-donor, -tissue) %>%
+    column_to_rownames(var = "sample")
+  
+  all_df$prep <- as.factor(all_df$prep)
+  all_df$disease <- as.factor(all_df$disease)
+  all_df$site <- as.factor(all_df$site)
+  all_df$sex <- as.factor(all_df$sex)
+  all_df$pct_correct_strand_reads <- NULL
+  
+  if(length(unique(all_df$site)) == 1 ){ all_df$site <- NULL}
+  if(length(unique(all_df$prep)) == 1 ){ all_df$prep <- NULL}
+  
+  all_df <- select(all_df,
+                   starts_with("PC", ignore.case = FALSE),
+                   "library prep" = prep,
+                   "submitting site" = site,
+                   "RIN" = rin,
+                   "% mRNA bases" = pct_mrna_bases,
+                   "median 5' bias" = median_5prime_bias,
+                   "median 3' bias" = median_5prime_bias,
+                   "% chimeric reads" = pct_chimeras,
+                   "% intergenic bases" = pct_intergenic_bases,
+                   "% stranding" = pct_r1_transcript_strand_reads,
+                   disease,
+                   sex, 
+                  # starts_with("gPC")
+                   )
+  # reorder
+  all_df <- all_df[ , c(paste0("PC", 1:10), names(all_df)[10:ncol(all_df)] ) ]
+  
+  # take first 10 expression PCs and correalte with covariates
+  n_var <- ncol(all_df)
+  matrix_rsquared <- matrix(NA, nrow = n_var, ncol = n_pc) #Number of factors
+  matrix_pvalue <- matrix(NA, nrow = n_var, ncol = n_pc) 
+  
+  for (row_pos in 1:n_var ){
+    for (col_pos in 1:n_pc){
+      matrix_rsquared[row_pos,col_pos] <- summary( lm(all_df[,col_pos] ~ all_df[,row_pos] ) )$adj.r.squared
+      f <- summary( lm(all_df[,col_pos] ~ all_df[,row_pos] ) )$fstatistic
+      #print(f)
+      if( !is.null(f) ){
+        pvalue <- pf(f[1],f[2],f[3],lower.tail=FALSE) 
+      } else{
+        pvalue <- NA
+      }
+      matrix_pvalue[row_pos,col_pos] <- pvalue
+    }
+  }
+  
+  matrix_rsquared <- as.data.frame(matrix_rsquared)
+  dimnames(matrix_rsquared) <- list( names(all_df), names(all_df)[1:n_pc])
+  
+  matrix_pvalue <- as.data.frame(matrix_pvalue)
+  dimnames(matrix_pvalue) <- list( names(all_df), names(all_df)[1:n_pc])
+  
+  matrix_rsquared <- matrix_rsquared %>%
+    rownames_to_column(var = "variable") %>%
+    dplyr::filter(!grepl("^PC", variable ) ) %>%
+    gather(key = "PC", value = "rsquared", -variable)
+  
+  
+
+  tech_loc$pct_correct_strand_reads <- NULL
+  
+  ## add RIN and prep to tech loc for correlation matrix
+  # set prep to a numeric variable as only two categories
+  
+  tech_loc$rin <- support_loc$rin[ match(tech_loc$sample, support_loc$sample)]
+  #tech_loc$rin 
+  tech_loc$prep <- support_loc$prep[ match(tech_loc$sample, support_loc$sample)]
+  tech_loc$prep <- as.numeric(as.factor(tech_loc$prep))
+  tech_loc <- tech_loc[complete.cases(tech_loc),]
+  tech_loc <- tech_loc %>% dplyr::select(-sample)
+  tech_loc <- tech_loc[, apply(tech_loc, MARGIN = 2, sd) != 0 ]
+  
+  tech_heatmap <- tech_loc %>% cor(method = "spearman") %>% abs()
+  
+  
+  cor_heatmap <- spread(matrix_rsquared, key = "PC", value = "rsquared" ) %>% column_to_rownames(var = "variable")
+  
+  cor_heatmap <- cor_heatmap[ , paste0("PC", 1:10)]
+  
+
+  
+  #all_df$big_batch <- all_df$total_counts > mean(all_df$total_counts) + 2 * sd(all_df$total_counts)
+  
+  # big batch explains very little per-gene variance - library size must be accounted for by limma and TMM.
+  var_part_file <- here::here(paste0("data/differential_expression/ALS/", t, "_variancePartition.RData"))
+    
+  if( rerun | !file.exists(var_part_file) ){
+    #require(variancePartition)
+    l <- makeCluster(4)
+    registerDoParallel(cl)
+    # load simulated data:
+    # geneExpr: matrix of gene expression values
+    # info: information/metadata about each sample
+    #form <- ~ Age + (1|Individual) + (1|Tissue) + (1|Batch)
+    form <- varpart_formula #+ gPC1 + gPC2 + gPC3 + gPC4
+    
+
+    varPart <- fitExtractVarPartModel( vobjGenes, form, all_df   )
+    save(varPart, file = var_part_file)
+  }else{
+    load(var_part_file)
+  }
+
+  # sort variables (i.e. columns) by median fraction
+  # of variance explained
+  vp <- sortCols( varPart )
+  
+  vp_names <- c(
+                   "library prep" = "prep",
+                   "submitting site" = "site",
+                   "RIN" = "rin",
+                   "% mRNA bases" = "pct_mrna_bases",
+                   "median 5' bias" = "median_5prime_bias",
+                   "median 3' bias" = "median_3prime_bias",
+                   "% chimeric reads" = "pct_chimeras",
+                  "% ribosomal bases" = "pct_ribosomal_bases",
+                   "% intergenic bases" = "pct_intergenic_bases",
+                   "% stranding" = "pct_r1_transcript_strand_reads",
+                   "disease" = "disease",
+                   "sex" = "sex", 
+                  "age at death" = "age",
+                  "residuals" = "Residuals"
+                   )
+
+  names(vp) <- names(vp_names)[ match(names(vp), vp_names)]
+
+  
+  # Figure 1a
+  # Bar plot of variance fractions for the first 10 genes
+  #plotPercentBars( vp[1:10,] )
+  
+  return(list(all_df = all_df, vp = vp, cor_heatmap = cor_heatmap, tech_heatmap = tech_heatmap))
+}
+
+var_part_raster <- function(obj){
+  col <-  c(ggColorHue(ncol(obj)-1), "grey85")
+  
+  obj %>% 
+    as.data.frame() %>% 
+    pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+    mutate(variable = factor(variable, levels = names(obj))) %>%
+    ggplot(aes(x = variable, y = value, group = variable)) + 
+    geom_violin( scale="width", aes(fill = factor(variable))) +
+    theme_bw() +
+    ggrastr::geom_boxplot_jitter(width=0.07, fill="grey", outlier.colour='black', outlier.size = 0.5) +
+    scale_fill_manual(values=col) +
+    theme(legend.position="none") +
+    theme(plot.title=element_text(hjust=0.5)) +
+    theme(axis.text.y = element_text(colour = "black"),
+          axis.ticks = element_line(colour = "black")) +
+    theme(axis.text.x = element_text(
+      angle = 20,
+      hjust = 1,
+      vjust = 1, 
+      colour = "black")) +
+    labs(x = "", y = "") +
+    scale_y_continuous(labels = scales::percent)
+}
+
+
+
+```
+
+
+# Lumbar Spinal Cord
+
+```{r}
+lsc_plots <- diagnosticPlots("Lumbar_Spinal_Cord")
+
+p1 <- as.ggplot(pheatmap(lsc_plots$cor_heatmap, main = "Variance of expression PC explained by covariate (R^2)", cluster_cols = FALSE  ))
+
+p2 <- as.ggplot(pheatmap(lsc_plots$tech_heatmap , main = "Absolute Spearman correlation between technical covariates"))
+
+vp_plot <- var_part_raster(lsc_plots$vp)
+
+lsc_pc1_strand_prep <- lsc_plots$all_df %>% ggplot(aes(x = PC1, y = `% stranding`, colour = `submitting site`, shape = `library prep`)) + geom_point() + scale_colour_viridis_d() + theme_bw()
+
+lsc_pc2_disease_prep <- lsc_plots$all_df %>% ggplot(aes(x = PC2, colour = `disease`, y = `% mRNA bases`)) + geom_point() + theme_bw()
+
+lsc_qc_multiplot <- 
+  ( p1 + vp_plot + plot_layout(widths = c(1,1.25) ) )  /
+  (lsc_pc1_strand_prep + lsc_pc2_disease_prep ) + 
+  plot_layout(heights = c(1,0.6)) + 
+  plot_annotation(tag_levels = "a") & theme(plot.tag = element_text(face = "bold"))
+
+ggsave(plot = lsc_qc_multiplot, filename = "../../ALS_SC/plots/LSC_QC_multiplot.pdf", width = 12, height = 9)
+
+
+lsc_qc_multiplot
+```
+
+# Cervical Spinal Cord
+
+```{r fig.width = 8, fig.height = 5}
+csc_plots <- diagnosticPlots("Cervical_Spinal_Cord")
+
+p1 <- as.ggplot(pheatmap(csc_plots$cor_heatmap, main = "Variance of expression PC explained by covariate (R^2)", cluster_cols = FALSE  ))
+
+p2 <- as.ggplot(pheatmap(csc_plots$tech_heatmap , main = "Absolute Spearman correlation between technical covariates"))
+
+# vp_plot <- plotVarPart( csc_plots$vp ) + labs(title = "Cervical Spinal Cord variance partition")# + plot_spacer() + plot_layout(ncol = 1, nrow = 2)
+# 
+vp_plot <- var_part_raster(csc_plots$vp)
+
+csc_pc1_strand_prep <- csc_plots$all_df %>% ggplot(aes(x = PC1, y = `% stranding`, colour = `submitting site`, shape = `library prep`)) + geom_point() + scale_colour_viridis_d() + theme_bw()
+
+csc_pc2_disease_prep <- csc_plots$all_df %>% ggplot(aes(x = PC2, colour = `disease`, y = `% mRNA bases`)) + geom_point() + theme_bw()
+
+csc_qc_multiplot <- 
+  ( p1 + vp_plot + plot_layout(widths = c(1,1.25) ) )  /
+  (csc_pc1_strand_prep + csc_pc2_disease_prep ) + 
+  plot_layout(heights = c(1,0.6)) + 
+  plot_annotation(tag_levels = "a") & theme(plot.tag = element_text(face = "bold"))
+
+ggsave(plot = csc_qc_multiplot, filename = "../../ALS_SC/plots/csc_QC_multiplot.pdf", width = 12, height = 9)
+
+
+var_part_raster(csc_plots$vp)
+
+
+```
+
+## Thoracic Spinal Cord
+
+```{r}
+tsc_plots <- diagnosticPlots("Thoracic_Spinal_Cord")
+
+p1 <- as.ggplot(pheatmap(tsc_plots$cor_heatmap, main = "Variance of expression PC explained by covariate (R^2)", cluster_cols = FALSE  ))
+
+p2 <- as.ggplot(pheatmap(tsc_plots$tech_heatmap , main = "Absolute Spearman correlation between technical covariates"))
+
+vp_plot <- var_part_raster(tsc_plots$vp)
+
+tsc_pc1_strand_prep <- tsc_plots$all_df %>% ggplot(aes(x = PC1, y = `% stranding`, colour = `submitting site`, shape = `library prep`)) + geom_point() + scale_colour_viridis_d() + theme_bw()
+
+tsc_pc2_disease_prep <- tsc_plots$all_df %>% ggplot(aes(x = PC2, colour = `disease`, y = `% mRNA bases`)) + geom_point() + theme_bw()
+
+tsc_qc_multiplot <- 
+  ( p1 + vp_plot + plot_layout(widths = c(1,1.25) ) )  /
+  (tsc_pc1_strand_prep + tsc_pc2_disease_prep ) + 
+  plot_layout(heights = c(1,0.6)) + 
+  plot_annotation(tag_levels = "a") & theme(plot.tag = element_text(face = "bold"))
+
+tsc_qc_multiplot 
+
+ggsave(plot = tsc_qc_multiplot, filename = "../../ALS_SC/plots/tsc_QC_multiplot.pdf", width = 12, height = 9)
+
+```

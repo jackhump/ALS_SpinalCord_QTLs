@@ -1,0 +1,275 @@
+---
+title: "ALS COLOC"
+author: "Jack Humphrey"
+date: "`r Sys.Date()`"
+output: 
+  rmarkdown::html_document:
+    theme: spacelab
+    highlight: zenburn
+    code_folding: hide
+    toc: true
+    toc_float: true
+    smooth_scroll: true
+    number_sections: false
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+```
+
+## Colocalisation with ALS GWAS
+
+
+```{r}
+
+# coloc_results <- list.files(here::here("data/QTLs/April_2020_tensorQTL/results/COLOC/Nicolas_1e-5"), pattern = "coloc_res.txt", full.names = TRUE)
+# 
+# coloc_names <- as.data.frame(str_split_fixed(basename(coloc_results), "_", 3)[,c(1:2)] )%>% tidyr::unite(col = "name")
+# 
+# names(coloc_results) <- coloc_names$name
+all_coloc_res <- read_tsv(here::here("data/QTLs/Nov_2020/results/COLOC/all_COLOC_results_merged_H4_0_no_LD.tsv.gz"))
+#all_coloc_res <- read_tsv(here::here("data/COLOC/Nicolas_suggestive/all_COLOC_results_merged_H4_0_no_LD.tsv.gz") )
+
+coloc_res_ld <- read_tsv(here::here("data/QTLs/Nov_2020/results/COLOC/all_COLOC_results_merged_H4_0.5_with_LD.tsv.gz"))
+```
+
+Find closest genes to loci
+
+Use SNP Nexus
+
+```{r}
+
+
+# gwas_snps <- tibble(
+#   c = "dbSNP",
+#   y = unique(coloc_res$GWAS_SNP)
+# )
+
+# write_tsv(gwas_snps, col_names = FALSE, file = "../../data/QTLs/nicolas_van_rheenen_gwas_snps.txt")
+
+snp_nexus <- read_tsv(here::here("data/QTLs/snp_nexus_near_gene_ALS GWAS suggestive.txt") ) %>%
+  janitor::clean_names()
+
+# get nearest protein-coding gene to each SNP
+# snp_nexus %>%
+#   select(-chromosome, -position, -annotation )
+
+# for each SNP
+# look at overlapping, upstream and downstream genes
+# first pick protein-coding genes only
+# then pick overlapping if available
+# then pick closest of upstream and downstream
+
+find_nearest_pc_gene <- function(x){
+  #print(x)
+    
+  gene <- "NONE"
+  # if overlaps multiple genes - pick protein coding
+  if( nrow(x) > 1){
+    if( "protein_coding" %in% x$type ){
+      gene <- x$overlapped_gene[ x$type == "protein_coding" ]
+      # if multiple pc genes then take first
+      gene <- gene[1]
+      return(tibble( variant_id = x$variation_id, gene = gene) )
+    }else{
+      # if no PC genes then go look up and downstream
+      x <- x[1,]
+    }
+  }
+  # if overlaps protein coding gene
+  if( x$type == "protein_coding" ){gene <- x$overlapped_gene}
+  # or the overlapped gene is the only gene
+  if( x$type != "protein_coding" & x$nearest_downstream_gene == "None" & x$nearest_upstream_gene == "None"){ gene <- x$overlapped_gene}
+  # if no overlap
+  if( x$overlapped_gene == "None"){
+    # check if up and down are PC, pick the one that is PC
+    if( x$type_of_nearest_downstream_gene == "protein_coding" & 
+        x$type_of_nearest_upstream_gene != "protein_coding"){ gene <- x$nearest_downstream_gene}
+    if( x$type_of_nearest_downstream_gene != "protein_coding" & 
+        x$type_of_nearest_upstream_gene == "protein_coding"){ gene <- x$nearest_upstream_gene}
+    # if neither or both are protein coding then pick closest
+    if( 
+        ( x$type_of_nearest_downstream_gene != "protein_coding" & 
+        x$type_of_nearest_upstream_gene != "protein_coding" ) |
+        ( x$type_of_nearest_downstream_gene == "protein_coding" & 
+        x$type_of_nearest_upstream_gene == "protein_coding" )
+    ){
+      if( 
+        ( as.numeric(x$distance_to_nearest_downstream_gene) <
+         as.numeric(x$distance_to_nearest_upstream_gene) ) 
+          ){ 
+        gene <- x$nearest_downstream_gene
+      }else{
+        gene <- x$nearest_upstream_gene
+      }
+    }
+  }
+  return(tibble( variant_id = x$variation_id, gene = gene) )
+}
+
+#x <- snp_nexus[1,]
+x <- snp_nexus[ snp_nexus$variation_id == "rs3849943",]
+
+nearest_genes <- 
+  split(snp_nexus, snp_nexus$variation_id) %>%
+  map_df( find_nearest_pc_gene )
+
+# some fuckup with SNP nexus
+nearest_genes$gene[ nearest_genes$gene == "AL451123.1" ] <- "C9orf72"
+
+
+write_tsv(nearest_genes,here::here("data/QTLs/snp_nexus_nearest_gene_labels.tsv"))
+
+## append nearest genes to GWAS loci
+gwas_loci <- read_tsv(here::here("data/GWAS/Nicolas_2018_hits_1e-5.tsv"))
+
+gwas_loci$nearest_gene <- nearest_genes$gene[match(gwas_loci$variant_id, nearest_genes$variant_id)]
+
+gwas_loci <- arrange(gwas_loci, gwas_loci$p_value)
+
+write_tsv(gwas_loci, here::here( "data/GWAS/Nicolas_2018_hits_1e-5_nearest_genes.tsv") )
+```
+
+
+
+```{r fig.width = 10, fig.height = 12}
+#coloc_res <- read_tsv(here::here("data/COLOC/Nicolas_suggestive/all_COLOC_results_merged_H4_0.5_with_LD.tsv.gz"))
+
+#"We called the signals colocalized when (coloc H3+H4 ≥ 0.8 and H4∕H3 ≥ 2)" -Yi et al. (2019)
+coloc_res <- full_join(all_coloc_res, coloc_res_ld)
+
+coloc_res$QTL <- gsub("NYGC_", "", coloc_res$QTL)
+coloc_res$QTL <- gsub("_VanRheenen", "", coloc_res$QTL)
+
+coloc_res$tissue <- coloc_res$QTL
+coloc_res$tissue <- str_split_fixed(coloc_res$QTL, "_", 2)[,1]
+# 
+# tissue_levels <- c("Cervical\nSpinal Cord", "Thoracic\nSpinal Cord", "Lumbar\nSpinal Cord", "RE2 meta-analysis", "RE2C meta-analysis", "GTEx Cervical\nSpinal Cord" )
+
+
+tissue_levels <- c("Cervical\nSpinal Cord", #"Thoracic\nSpinal Cord", 
+                   "Lumbar\nSpinal Cord", "GTEx Cervical\nSpinal Cord" )
+
+# 
+coloc_res <- mutate(coloc_res, tissue = case_when(
+   tissue == "Cervical" ~ "Cervical\nSpinal Cord",
+   tissue == "Thoracic" ~ "Thoracic\nSpinal Cord",
+   tissue == "Lumbar" ~ "Lumbar\nSpinal Cord",
+   tissue == "GTEX" ~ "GTEx Cervical\nSpinal Cord",
+   grepl("SC_meta.*RE2$", QTL) ~ "RE2 meta-analysis",
+   grepl("SC_meta.*RE2C$", QTL) ~ "RE2C meta-analysis"
+  # tissue == "SCmeta" ~ "NYGC meta-analysis",
+  # tissue == "SC" ~ "All meta-analysis"
+ ) ) %>%
+  mutate(tissue = factor(tissue, levels = tissue_levels))
+# 
+coloc_res <- mutate(coloc_res, coloc = PP.H3.abf + PP.H4.abf > 0.8 & (PP.H4.abf / PP.H3.abf) >= 2 )
+
+coloc_res$SNP_distance <- abs(coloc_res$GWAS_pos - coloc_res$QTL_pos)
+
+coloc_res <- mutate(coloc_res, distance_filter = case_when( 
+  type == "eQTL" & SNP_distance < 5e5 | (!is.na(LD) & LD >= 0.1 ) ~ "PASS",
+  type == "sQTL" & SNP_distance < 1e5 | (!is.na(LD) & LD >= 0.1) ~ "PASS",
+  TRUE ~ "FAIL"
+) )
+
+table(coloc = coloc_res$coloc, filter = coloc_res$distance_filter)
+
+coloc_res <- filter(coloc_res, distance_filter == "PASS")
+
+coloc_res$nearest_gene <- nearest_genes$gene[match(coloc_res$GWAS_SNP, nearest_genes$variant_id)]
+
+coloc_res$locus <- paste0(coloc_res$nearest_gene, " P=", signif(coloc_res$GWAS_P,digits = 2) )
+
+# remove duplicate loci
+coloc_res <- filter(coloc_res, locus != "SNAI1 P=6.7e-06" )
+
+
+# make plot
+make_coloc_plot <- function(gwas, tissues = tissue_levels, min_gwas_p = 1e-5, min_PP4 = 0.7){
+  
+  # get out loci that contain at least one gene with PP4 > min_PP4
+  coloc_hits <- filter(coloc_res, GWAS == gwas, GWAS_P < min_gwas_p, distance_filter == "PASS",  PP.H4.abf > min_PP4, tissue %in% tissue_levels )
+  locus_order <- coloc_hits %>% select(locus, GWAS_P) %>% distinct() %>% arrange(GWAS_P) %>% pull(locus)
+
+  coloc_res %>%
+  filter(GWAS == gwas, GWAS_P < min_gwas_p ) %>%
+  filter(!is.na(tissue)) %>%
+  filter(paste(locus, QTL_Gene) %in% paste(coloc_hits$locus, coloc_hits$QTL_Gene) ) %>%
+  select(QTL, locus, PP.H4.abf, type, QTL_Gene) %>%
+  group_by(QTL, locus, type, QTL_Gene) %>%
+  # for sQTLs - show best PP4
+  summarise(PP.H4.abf = max(PP.H4.abf) ) %>%
+  left_join(coloc_res) %>%
+  mutate(h4 = signif(PP.H4.abf, digits = 2)) %>%
+  # throw out PP4 less than 0.1
+  mutate(h4 = ifelse(h4 < 0.1, NA, h4) ) %>%
+  #mutate(tissue = gsub("_sQTL", "", QTL)) %>%
+  # print loci in order of GWAS significance
+  mutate(locus = factor(locus, levels = locus_order)) %>%
+  # FOR NOW
+  mutate(tissue = factor(tissue, levels = tissue_levels)) %>%
+  #mutate(tissue = gsub("_", "\n", tissue)) %>%
+  #mutate( tissue = factor(gsub("_", " ", tissue), levels = tissue_order)) %>%
+  #mutate( QTL = factor(gsub("_", " ", QTL), levels = tissue_order)) %>%
+    #select(locus, QTL_Gene, QTL, type, PP.H4.abf)  %>% 
+  ggplot(aes(y = QTL_Gene, x = type)) + 
+  geom_point(aes(
+    colour = tissue, 
+    shape = type, size = PP.H4.abf, alpha = PP.H4.abf), position = position_nudge(x = -0.25)) + 
+  geom_text(aes(label = h4), nudge_x = 0.25) +
+  facet_grid(locus ~ tissue, scales = "free_y",space = "free_y" ) +
+  
+  scale_colour_manual(values = c("orangered2", "orangered2", 
+                                 #"orangered2", "blue3", "blue3",
+                                 "purple2")) +
+  theme_bw() +
+    theme(strip.text.y = element_text(angle = 0, colour = "black", hjust = 0.5, face = "bold"), 
+          strip.text.x = element_text(angle = 0, colour = "black", face = "bold"), 
+          axis.text.x = element_text(angle = 45, hjust = 1, colour = "black"), 
+          axis.text.y = element_text(face = "italic", colour = "black"),
+          strip.background = element_blank(), 
+          legend.position = "top",
+          legend.box.margin = margin(c(0,0,0,0)), 
+          legend.margin = margin(c(0,0,0,0)),
+          strip.placement = "outside",
+          panel.spacing.y = unit(x = 0,units = "points"), panel.border = element_rect(fill = NA, size = 0.2, colour = "black"), 
+          panel.spacing.x = unit(x = 0,units = "points"),
+          panel.grid = element_blank(),
+          axis.ticks = element_line(colour = "black")
+          ) +
+    scale_size_continuous(limits = c(0,1)) +
+    scale_alpha_continuous(limits = c(0,1)) +
+    guides(size = FALSE, alpha = FALSE) +
+    scale_x_discrete(position = "bottom") +
+    labs(x = "", y = "", colour = "Tissue")#, title = disease_title , subtitle = paste0(gwas_subtitle, "; min H4 = ", min_h4)  )
+}
+
+nicolas_plot <- make_coloc_plot("NicolasSuggestive_2018", min_gwas_p = 1e-5, min_PP4 = 0.5)
+##van_rheenen_plot <- make_coloc_plot("2021_EUR", min_gwas_p = 1e-5, min_PP4 = 0.5)
+nicolas_plot 
+# ggsave(coloc_plot, width = 9, height = 12, filename = here::here("ALS_SC/plots/ALS_SC_GWAS_COLOC_plot.pdf" ) )
+# 
+# write_tsv(coloc_hits, path = here::here("data/QTLs/Nov_2020/results/COLOC/SC_COLOC_hits.tsv"))
+ggsave(nicolas_plot, width = 7.5, height = 7.5, filename = here::here("ALS_SC/plots/ALS_SC_GTEx_Nicolas_GWAS_COLOC_plot.pdf") )
+
+##ggsave(van_rheenen_plot, width = 7, height = 12,filename = here::here("ALS_SC/plots/ALS_SC_GTEx_VanRheenen_GWAS_COLOC_plot.pdf") )
+```
+
+
+Save COLOC results for supplement
+
+```{r}
+coloc_out <- coloc_res %>%
+  filter(distance_filter == "PASS", GWAS == "NicolasSuggestive_2018", PP.H4.abf > 0.5,tissue %in% tissue_levels) %>%
+  select( -distance_filter, -coloc, -disease, -GWAS, -locus, -tissue ) %>%
+  select( GWAS_nearest_gene = nearest_gene, everything() ) %>%
+  arrange(desc(PP.H4.abf))
+
+write_tsv(coloc_out, here::here("ALS_SC/tables/coloc_results.tsv"))
+
+
+```
+

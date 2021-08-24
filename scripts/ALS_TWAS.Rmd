@@ -1,0 +1,200 @@
+---
+title: "TWAS Results"
+author: "Jack Humphrey"
+date: "`r Sys.Date()`"
+output: 
+  rmarkdown::html_document:
+    theme: spacelab
+    highlight: zenburn
+    code_folding: hide
+    toc: true
+    toc_float: true
+    smooth_scroll: true
+    number_sections: false
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(ggrepel)
+library(here)
+```
+
+
+Load in TWAS results
+
+```{r fig.width = 12}
+results_files <- list.files(here::here("data/TWAS/"), pattern = "fusion_res", full.names = TRUE, recursive = TRUE)
+names(results_files) <- basename(results_files)
+
+all_res <- map_df(results_files, ~{
+  read_tsv(.x)  %>%
+    mutate(twas_fdr = p.adjust(TWAS.P, method = "BH"),
+           twas_bonferroni = p.adjust(TWAS.P, method = "bonferroni"))
+  }, .id = "dataset" ) %>%
+  janitor::clean_names()
+
+all_res$QTL <- gsub(".fusion_res.tsv", "",str_split_fixed(all_res$dataset, "\\.", 2)[,2])
+
+all_res$type <- ifelse( grepl("SPLICING|sQTL", all_res$QTL), "sQTL", "eQTL")
+all_res$tissue <- gsub("_", " ", gsub("NYGC|_sQTL|_SPLICING", "", all_res$QTL) )
+
+all_res <- all_res %>% 
+  mutate(gene = case_when(
+  grepl("chr", id) ~ str_split_fixed(id, ":", 4)[,4],
+  TRUE ~ id ) ) %>%
+  mutate( abs_z = abs(twas_z))
+
+#all_res$QTL <- basename(dirname(all_res$file) )
+
+# group_by(all_res, QTL, sig = twas_fdr < 0.05) %>%
+#   summarise( n = n() ) %>%
+#   filter(sig == TRUE) %>%
+#   arrange(desc(n))
+
+table(all_res$twas_fdr < 0.05) # 82 associations
+table(all_res$twas_bonferroni < 0.05) # 42 associations!
+```
+
+
+Make plots
+
+```{r fig.width = 9, fig.height = 4}
+
+make_z_plot <- function(data){
+  gwas_order <- filter(data, twas_bonferroni < 0.05) %>% 
+    ungroup() %>%
+    select(best_gwas_id, best_gwas_z) %>% distinct() %>%
+    arrange(desc(best_gwas_z)) %>%
+    filter( !duplicated(best_gwas_id))
+  
+  #return(gwas_order)
+  
+  hits <- filter(data, twas_bonferroni < 0.05)
+  
+  #print(hits)
+  
+  data %>%
+  filter(id %in% unique(hits$id) ) %>%
+  mutate(best_gwas_id = factor(best_gwas_id, levels = gwas_order$best_gwas_id)) %>%
+  ggplot(aes(x = QTL, y = gene)) + geom_tile(aes(fill = twas_z)) +
+  scale_fill_distiller(type = "div" ) +
+    facet_grid(best_gwas_id ~ ., scales = "free_y",space = "free_y" ) +
+    theme_bw() +
+    theme(strip.text.y = element_text(angle = 0, colour = "black", hjust = 0.5), 
+          strip.text.x = element_text(angle = 0, colour = "black", face = "bold"), 
+          axis.text.x = element_text(angle = 45, hjust = 1, colour = "black"), 
+          axis.text.y = element_text(face = "italic", colour = "black"),
+          strip.background = element_blank(), 
+          legend.position = "top",
+          legend.box.margin = margin(c(0,0,0,0)), 
+          legend.margin = margin(c(0,0,0,0)),
+          strip.placement = "outside",
+          panel.spacing.y = unit(x = 0,units = "points"), panel.border = element_rect(fill = NA, size = 0.2, colour = "black"), 
+          panel.spacing.x = unit(x = 0,units = "points"),
+          panel.grid = element_blank(),
+          axis.ticks = element_line(colour = "black")
+          ) +
+    scale_size_continuous(limits = c(0,1)) +
+    scale_alpha_continuous(limits = c(0,1)) +
+    guides(size = FALSE, alpha = FALSE) +
+    scale_x_discrete(position = "bottom") +
+    labs(x = "", y = "", colour = "Tissue")
+}
+
+
+
+
+# get largest abs Z-score for each gene in each panel
+
+best_z_res <- all_res %>%
+  filter(grepl("NYGC|CMC", QTL) ) %>%
+  group_by(dataset, panel, gene) %>%
+  summarise( abs_z = max(abs_z) ) %>%
+  left_join(all_res)
+
+best_z_res <- mutate( best_z_res,
+  type = ifelse(type == "eQTL", "expression", "splicing"),
+  tissue = ifelse(tissue == "CMC.BRAIN.RNASEQ", "Frontal Cortex (CMC)", tissue)
+)
+
+
+best_z_res %>% make_z_plot( )
+
+
+make_manhattan <- function(d, bh = 0.05){
+  
+  ymax <- max(d$twas_z,na.rm=T)+0.5
+  ymin <- min(d$twas_z,na.rm=T)-0.5
+
+  Sig_Z_Thresh <- qnorm(1-(0.05/length(d$twas_z))/2)
+  
+  d <- ungroup(d)
+  
+  d <- arrange( d, chr, p0)
+  d <- as.data.frame(d)
+  d$pos <- NA
+	ticks <- NULL
+	lastbase <- 0
+	numchroms <- length(unique(d$chr))
+
+	for (i in unique(d$chr)) {
+	  if (i==1) {
+	    d[d$chr==i, ]$pos = d[d$chr==i, ]$p0
+	  }	else {
+	    lastbase=lastbase + tail(subset(d,chr==i-1)$p0, 1)
+	    d[d$chr==i, ]$pos <- d[d$chr==i, ]$p0+lastbase
+	  }
+	  ticks <- c(ticks, d[d$chr==i, ]$pos[floor(length(d[d$chr==i, ]$pos)/2)+1])
+	}
+	
+	ticklim=c(min(d$pos),max(d$pos))
+
+	mycols=rep(c("gray35","gray72"),60)
+  chr_labs <- as.character(unique(d$chr))
+	chr_labs[chr_labs == '19'| chr_labs == '21']<-' '
+  
+  d %>%
+  ggplot(aes(x = pos, y = twas_z)) + 
+  ggrastr::rasterise(geom_point(aes(colour = factor(chr) ), size = 0.3 ), dpi = 600 ) +
+  geom_text_repel(data = filter(d, twas_bonferroni < bh), aes(x = pos, y = twas_z, label = gene), fontface = "italic" ) + 
+  geom_point(data = filter(d, twas_bonferroni < bh, type == "expression"), colour = "forestgreen", size = 1) + 
+  geom_point(data = filter(d, twas_bonferroni < bh, type == "splicing"), colour = "blue", size = 1) + 
+  facet_wrap(~tissue, ncol = 1) +
+  theme_classic() + 
+  scale_x_continuous(name="Chromosome", breaks=ticks, labels=chr_labs) +
+	scale_y_continuous(name='Z score',limits=c(ymin,ymax)) +
+  scale_colour_manual(values=mycols, guide=FALSE) +
+  theme(strip.background = element_blank(), 
+        panel.border = element_rect(fill = NA, colour = "black"), 
+        axis.line = element_blank(),
+        strip.text.x = element_text(face = "bold" ),
+        axis.text = element_text(colour = "black"),
+        axis.ticks = element_line(colour = "black")
+        )
+}
+
+twas_multiplot <- best_z_res %>% make_manhattan()
+
+
+twas_multiplot
+
+ggsave(plot = twas_multiplot, filename = "../../ALS_SC/plots/TWAS_multiplot.pdf", height = 8, width = 8)
+
+```
+
+
+Write out TWAS results
+
+```{r}
+twas_out <- best_z_res %>%
+  ungroup() %>%
+  select( -dataset, -panel, -file, -QTL) %>%
+  select(tissue, type, gene, id, everything()) %>%
+  mutate(tissue =gsub("^ ", "", tissue))
+
+write_tsv(twas_out, file = here::here("ALS_SC/tables/twas_results.tsv"))
+
+```
+

@@ -1,0 +1,464 @@
+---
+title: "Making Locus Plots"
+date: "`r Sys.Date()`"
+output: 
+  rmarkdown::html_document:
+    theme: spacelab
+    highlight: zenburn
+    code_folding: hide
+    toc: true
+    toc_float: true
+    smooth_scroll: true
+    number_sections: false
+    self_contained: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+```
+
+
+## Make Locus Plots
+
+```{r fig.width = 16}
+library(ggbio)
+library(GenomicRanges)
+library(tidyverse)
+
+
+gencode_plot <- function(genename, n = Inf){
+  gff_loc <- gencode_gff[ gencode_gff$gene_name == genename]
+  
+  transcripts <- unique(gff_loc$transcript_id)
+  transcripts <- transcripts[order(transcripts)]
+  transcripts <- tail(transcripts, n)
+  
+  gff_loc <- gff_loc[ gff_loc$transcript_id %in% transcripts]
+  
+  #gff_split <- split(gff_loc, gff_loc$transcript_id)
+  gff_loc <- gff_loc[ gff_loc$type %in% c("exon", "UTR")]
+  ggplot() + geom_alignment( gff_loc, aes(group = transcript_id, fill = "GENCODE"), range.geom = "rect", gap.geom = "arrow")+ 
+    theme_bw() + scale_fill_manual(values = "black") +
+    labs(fill = "") #+ theme(legend.text = element_blank())
+}
+
+
+junction_plot <- function(gene, gwas, qtl, n = Inf, colourby = "PP.H4.abf", legend_pos = "right", min_coloc = 0.5){
+  junctions_loc <- filter(all_coloc, QTL_Gene == gene, QTL == qtl, GWAS == gwas, PP.H4.abf > min_coloc) %>%
+    tidyr::separate(QTL_junction, into = c("chr", "start", "end"), sep = ":|-", remove = FALSE ) %>%
+    mutate(start = as.numeric(start), end = as.numeric(end)) %>%
+    arrange(desc(PP.H4.abf)) %>%
+    head(n)
+  
+  stopifnot(nrow(junctions_loc) > 0)
+  
+  ## Plot a bar
+  grange_loc <-  
+    GRanges(seqnames = junctions_loc$chr, 
+            ranges = IRanges(start = junctions_loc$start, end = junctions_loc$end), 
+            PP.H4.abf = junctions_loc$PP.H4.abf, 
+            SNP = junctions_loc$QTL_SNP, junction_id = junctions_loc$QTL_junction#, 
+            #QTL_Beta = junctions_loc$QTL_Beta  
+            )
+  
+  
+  grange_loc$junction_id <- factor(grange_loc$junction_id, levels = rev(junctions_loc$QTL_junction))
+  
+  plot <- 
+    ggplot() + 
+    geom_alignment(data = grange_loc, aes_string(group = "junction_id", fill = colourby), colour = NA, range.geom = "rect" ) + 
+    scale_fill_viridis_c(values = c(0,1)) + theme_bw() + theme(legend.position = legend_pos)
+
+  return(plot)
+}
+
+snp_plot <- function(Gene, qtl, snp_width = 50, type = "GWAS", n = Inf, min_coloc = 0.5, rs = FALSE){
+  if(type == "GWAS"){
+  snp_loc <- filter(all_coloc, QTL_Gene == Gene, QTL == qtl) %>%
+    dplyr::select(SNP = GWAS_SNP, chr = GWAS_chr, end = GWAS_pos, GWAS) %>%
+    distinct() %>%
+    mutate(label = paste0(GWAS, "\n", SNP) )
+  
+    #tidyr::separate(QTL_junction, into = c("chr", "start", "end"), sep = ":|-", remove = FALSE ) %>%
+    #mutate(start = as.numeric(start), end = as.numeric(end)) %>%
+    #arrange(desc(PP.H4.abf)) %>%
+    #head(n)
+  stopifnot(nrow(snp_loc) > 0)
+  
+  ## Plot a bar
+  grange_loc <-  
+    GRanges(seqnames = snp_loc$chr, 
+            ranges = IRanges(start = snp_loc$end - snp_width, end = snp_loc$end), 
+            SNP = snp_loc$SNP, GWAS = snp_loc$GWAS, label = snp_loc$label )
+  }
+  if(type == "QTL"){
+    snp_loc <- filter(all_coloc, QTL_Gene == Gene, QTL == qtl, PP.H4.abf >= min_coloc) %>%
+      dplyr::select(SNP = QTL_SNP, chr = QTL_chr, end = QTL_pos, QTL_junction, PP.H4.abf) %>%
+      distinct() %>%
+    arrange(desc(PP.H4.abf)) %>%
+    mutate(label = paste0(QTL_junction,"\n", SNP) )
+    #tidyr::separate(QTL_junction, into = c("chr", "start", "end"), sep = ":|-", remove = FALSE ) %>%
+    #mutate(start = as.numeric(start), end = as.numeric(end)) %>%
+    #arrange(desc(PP.H4.abf)) %>%
+    #head(n)
+    # only keep RS ID SNPs
+    if(rs == TRUE){
+      snp_loc <- snp_loc %>%
+        filter(grepl("rs", SNP ) )
+    }
+    # if only want top n SNPs
+    snp_loc <- snp_loc %>%  head(n)
+    
+    stopifnot(nrow(snp_loc) > 0)
+    
+    ## Plot a bar
+    grange_loc <-  
+      GRanges(seqnames = snp_loc$chr, 
+              ranges = IRanges(start = snp_loc$end - snp_width, end = snp_loc$end), 
+              SNP = snp_loc$SNP, label = snp_loc$label )
+    grange_loc$label <- factor(grange_loc$label, levels = rev(snp_loc$label))
+    
+  }
+  
+  #grange_loc$junction_id <- factor(grange_loc$junction_id, levels = rev(junctions_loc$QTL_junction))
+  
+  plot <- 
+    ggplot() + 
+    geom_alignment(data = grange_loc, aes(group = label, fill = "test"), range.geom = "rect" ) +
+    theme_bw() + scale_fill_manual(values = "black") +
+    theme(legend.text = element_blank() ) + labs(fill = "")
+    #scale_fill_viridis_c() + theme_bw() #+# theme(legend.position = "top")
+
+  return(plot)
+}
+
+all_coloc <- read_tsv(here::here("data/QTLs/Nov_2020/results/COLOC/all_COLOC_results_merged_H4_0_no_LD.tsv.gz"))
+
+all_coloc <- filter(all_coloc, GWAS == "NicolasSuggestive_2018")
+
+#all_coloc <- read_tsv(here::here("data/COLOC/Nicolas_suggestive/all_COLOC_results_merged_H4_0_no_LD.tsv.gz"))
+
+all_coloc$GWAS <- "Nicolas_2018"
+
+coloc_hit_genes <- filter(all_coloc, PP.H4.abf > 0.5) %>% pull(QTL_Gene)
+
+gencode_coloc <- here::here("ALS_SC/gencode_for_coloc_hits.RData")
+if( !file.exists(gencode_coloc)){
+
+  gencode_gff <- rtracklayer::import("~/GENCODE/gencode.v30.annotation.gtf.gz")
+  gencode_gff <- gencode_gff[ gencode_gff$gene_name %in% coloc_hit_genes ]
+  save(gencode_gff, file = gencode_coloc )
+}else{
+  load(gencode_coloc)
+}
+
+```
+
+```{r}
+process_vcf <- function(vcf, ID = NA){
+  if( !is.na(ID) ){
+      vcf$ID <- ID
+    }
+  out <- vcf %>%
+    select(-CHROM, -POS,-REF, -ALT, -QUAL, -FILTER, -INFO, -FORMAT) %>%
+    tidyr::gather(key = "sample", value = "genotype", -ID) %>%
+    mutate(genotype = str_split_fixed(genotype, ":", 2)[,1] ) %>%
+    mutate(genotype_binary = 
+             case_when(genotype == "0/0" ~ 0,
+                       genotype == "0/1" ~ 1,
+                      genotype == "1/1" ~ 2 ),
+           sample = gsub("\\.", "-", sample)
+    )
+  return(out)
+}
+
+process_junctions <- function(junction_bed, gene){
+  sqtl_loc <- junction_bed #%>%
+    #filter(gid == gene) 
+  
+  junction_ids <- str_split_fixed(sqtl_loc$ID, ":", 5)[,c(1,2,3)] 
+  sqtl_loc$junction_id <- apply(junction_ids, MAR = 1, FUN = function(x) { paste0(x[1], ":", x[2], "-", x[3])} )
+  
+  sqtl_loc %>%
+    select(-Chr, -start, -end, -gid, -strand, -ID ) %>%
+    tidyr::gather(key = "sample", value = "junction_ratio", -junction_id)
+}
+
+```
+
+## ATXN3
+
+```{r fig.width = 8, fig.height = 7}
+
+atxn3_gencode <- gencode_plot("ATXN3", 10)
+
+
+atxn3_junctions <- junction_plot(gene = "ATXN3", gwas = "Nicolas_2018", qtl = "NYGC_Lumbar_sQTL", n = 3 )
+
+#tracks("GENCODE v30" = atxn3_gencode, "sQTL junctions" = atxn3_junctions, heights = c(4,1))
+
+qtl_snps <- snp_plot(Gene = "ATXN3", qtl = "NYGC_Lumbar_sQTL", type = "QTL", min_coloc = 0.8, n = 1, rs = TRUE)
+
+gwas_snps <- snp_plot(Gene = "ATXN3", qtl = "NYGC_Lumbar_sQTL", type = "GWAS")
+
+## POLYQ EXPANSION - hg38 chr14:92071010-92071011
+expansion_gr <- GRanges(seqnames = "chr14", ranges = IRanges(start = 92071010, end = 92071011), label = "SCA3 expansion site")
+
+expansion_plot <- 
+  ggplot() + 
+    geom_alignment(data = expansion_gr, aes(group = label, fill = ""), range.geom = "rect" ) + theme_bw() +
+  labs(fill = "")
+
+atxn3_plot <- tracks("GENCODE v30" = atxn3_gencode, "sQTL junctions" = atxn3_junctions,
+       "GWAS" = gwas_snps,
+       "QTL" = qtl_snps,
+       "SCA3" = expansion_plot,
+       heights = c(7,3,1,1,1),
+  xlim = c(92044496,92106625 )
+) +
+  theme(panel.grid = element_blank(), axis.text = element_text(colour = "black"), axis.ticks = element_line(colour = "black") )
+
+ggsave(atxn3_plot,filename =  here::here("ALS_SC/plots/ATXN3_multiplot.pdf"), width = 8, height = 5 )
+
+
+atxn3_plot
+```
+
+## C9orf72
+
+```{r fig.width = 8, fig.height = 7}
+
+c9_gencode <- gencode_plot("C9orf72", 10)
+
+c9_junctions <- junction_plot(gene = "C9orf72", gwas = "Nicolas_2018", qtl = "NYGC_Lumbar_sQTL", min_coloc = 0, n = 2 )
+
+#tracks("GENCODE v30" = c9_gencode, "sQTL junctions" = c9_junctions, heights = c(4,1))
+
+qtl_snps <- snp_plot(Gene = "C9orf72", qtl = "NYGC_Lumbar_sQTL", type = "QTL", min_coloc = 0.7, n = 1, rs = TRUE)
+
+gwas_snps <- snp_plot(Gene = "C9orf72", qtl = "NYGC_Lumbar_sQTL", type = "GWAS")
+
+# find C9 HRE region 
+# chr9:27573528-27573546 (thanks Expansion Hunter!)
+expansion_gr <- GRanges(seqnames = "chr9", ranges = IRanges(start = 27573528, end = 27573546), label = "Hexanucleotide repeat")
+
+
+expansion_plot <- 
+  ggplot() + 
+    geom_alignment(data = expansion_gr, aes(group = label, fill = ""), range.geom = "rect" ) + theme_bw() +
+  labs(fill = "")
+
+c9_plot <- tracks("GENCODE v30" = c9_gencode, 
+                  "sQTL junctions" = c9_junctions,
+       "GWAS" = gwas_snps,
+       "QTL" = qtl_snps,
+       "SCA3" = expansion_plot,
+       heights = c(7,2,1,1,1),
+  xlim = c(27535340,27573866 )
+) +
+  theme(panel.grid = element_blank(), axis.text = element_text(colour = "black"), axis.ticks = element_line(colour = "black") )
+
+
+c9_plot
+ggsave(c9_plot,filename =  here::here("ALS_SC/plots/C9orf72_multiplot.pdf"), width = 8, height = 5 )
+```
+
+
+
+
+# FNBP1
+
+```{r fig.width = 8, fig.height = 7}
+fnbp1_gencode <- gencode_plot("FNBP1", Inf)
+
+fnbp1_junctions <- junction_plot(gene = "FNBP1", gwas = "Nicolas_2018", qtl = "NYGC_Lumbar_sQTL", min_coloc = 0.1)
+
+#tracks("GENCODE v30" = fnbp1_gencode, "sQTL junctions" = fnbp1_junctions, heights = c(4,1))
+
+qtl_snps <- snp_plot(Gene = "FNBP1", qtl = "NYGC_Lumbar_sQTL", type = "QTL", min_coloc = 0.1, rs = TRUE)
+
+gwas_snps <- snp_plot(Gene = "FNBP1", qtl = "NYGC_Lumbar_sQTL", type = "GWAS")
+
+
+fnbp1_plot <- tracks("GENCODE v30" = fnbp1_gencode, 
+                  "sQTL junctions" = fnbp1_junctions,
+       "GWAS" = gwas_snps,
+       "QTL" = qtl_snps,
+       heights = c(7,2,1,2)
+) +
+  theme(panel.grid = element_blank(), axis.text = element_text(colour = "black"), axis.ticks = element_line(colour = "black") )
+
+
+fnbp1_meta <- filter(all_coloc, QTL_Gene == "FNBP1", GWAS == "Nicolas_2018", QTL == "NYGC_Lumbar_sQTL")
+
+
+fnbp1_plot
+```
+
+FNBP1 is a sQTL, clearly a cassette exon. GTEx labels it exon 12.
+This exon sQTL turns up in GTEX (esophagus, colon) but not in brain. A different sQTL which I don't detect futher upstream.
+Is inclusion of this exon cell-type specific?
+Plan: Correlate exon usage with deconvolved proportions.
+If it's a cell-type specific effect there should be an association.
+
+
+# Compare FNBP1 QTL with cell proportions
+
+```{r}
+mathys_music_resid <- read_tsv(here::here("data/deconvolution/Mathys_MuSiC_residual_results.tsv"))
+sample_key <- read_tsv( here::here("ALS_SC/FNBP1/LumbarSpinalCord_sample_key.txt"))
+
+deconv_df <- mathys_music_resid  %>%
+  select(sample_id = sample, cell, deconv) %>%
+  pivot_wider(names_from = cell,values_from = deconv )  %>%
+  left_join(sample_key) %>%
+  select(sample = participant_id, -sample_id, everything() ) %>%
+  drop_na()
+
+
+
+
+sqtl_junctions <- read_tsv( here::here("ALS_SC/FNBP1/CSC_FNBP1_splicing.txt") )  %>%
+    select(-`#Chr`, -start, -end, -ID ) %>%
+    tidyr::gather(key = "sample", value = "junction_ratio")
+
+fnbp_genotypes <- process_vcf(vcf = read.table(here::here("ALS_SC/FNBP1/FNBP1_rs11370213.vcf"), header=TRUE), ID = "rs11370213" )
+
+covariates <- read_tsv(here::here("ALS_SC/FNBP1/LumbarSpinalCord_splicing_peer15.gene.combined_covariates.txt")) %>%
+  pivot_longer(names_to = "sample", values_to = "value", cols = !ID) %>%
+  pivot_wider( names_from = "ID",values_from = "value" )
+
+
+
+fnbp1_lm <- inner_join(sqtl_junctions, covariates) %>%
+  column_to_rownames(var = "sample")
+
+#summary( lm(junction_ratio ~ genotype_binary, fnbp1_lm) )
+fnbp1_resid <- resid( lm(junction_ratio ~ ., fnbp1_lm) )
+
+fnbp1_all <- fnbp1_lm %>%
+  rownames_to_column(var = "sample") %>%
+  mutate(genotype_binary = fnbp_genotypes$genotype_binary[match(.$sample, fnbp_genotypes$sample)]) %>%
+  mutate( junction_resid = fnbp1_resid) %>%
+  left_join(deconv_df, by = "sample")
+
+
+fnbp1_all %>%
+  mutate(genotype_binary = factor(genotype_binary)) %>%
+  ggplot(aes(x = genotype_binary, y = junction_ratio)) + geom_boxplot(aes(group = genotype_binary)) +
+  geom_jitter(width = 0.2, height = 0) +
+  ggpubr::stat_compare_means()
+
+fnbp1_all %>%
+  mutate(genotype_binary = factor(genotype_binary)) %>%
+  ggplot(aes(x = genotype_binary, y = junction_resid)) + geom_boxplot(aes(group = genotype_binary)) +
+  geom_jitter(width = 0.2, height = 0) +
+  ggpubr::stat_compare_means()
+
+
+fnbp1_all %>%
+  ggplot(aes(x = Oli, y = junction_resid, colour = factor(genotype_binary) )) + geom_point() +
+  geom_smooth(method = "lm") + theme_classic()
+
+
+summary(lm( junction_resid ~ genotype_binary + Oli + Ast + Mic + End + Per + Ex,  fnbp1_all ))
+
+```
+
+FNBP1 sQTL is only significant after regressing covariates
+
+deconvolution only available for 129 out of 179 samples 
+no obvious interaction effect of FNBP1 splicing.
+
+
+## NFASC
+
+```{r fig.width = 8, fig.height = 7 }
+nfasc_gencode <- gencode_plot("NFASC", 10)
+
+nfasc_junctions <- junction_plot(gene = "NFASC", gwas = "Nicolas_2018", qtl = "NYGC_Cervical_sQTL", min_coloc = 0.2)
+
+#tracks("GENCODE v30" = nfasc_gencode, "sQTL junctions" = nfasc_junctions, heights = c(4,1))
+
+qtl_snps <- snp_plot(Gene = "NFASC", qtl = "NYGC_Cervical_sQTL", type = "QTL", min_coloc = 0.2, rs = FALSE)
+
+gwas_snps <- snp_plot(Gene = "NFASC", qtl = "NYGC_Cervical_sQTL", type = "GWAS")
+
+
+nfasc_plot <- tracks("GENCODE v30" = nfasc_gencode, 
+                  "sQTL junctions" = nfasc_junctions,
+       "GWAS" = gwas_snps,
+       "QTL" = qtl_snps,
+       heights = c(10,2,1,2),
+       xlim = c(204970000, 205000000)
+) +
+  theme(panel.grid = element_blank(), axis.text = element_text(colour = "black"), axis.ticks = element_line(colour = "black") )
+
+
+nfasc_plot
+```
+
+NFASC has an orphan intron sQTL - no other introns from its Leafcutter cluster remained for testing.
+LSC - chr1 204982020-204987418 has high PP4 = 0.77
+In CSC - same intron has highest coloc (0.32), but a couple of other introns are kept, showing a complex locus.
+
+## GGNBP2 
+An eQTL
+
+```{r}
+ggnbp2_gencode <- gencode_plot("GGNBP2", 10)
+
+#ggnbp2_junctions <- junction_plot(gene = "GGNBP2", gwas = "Nicolas_2018", qtl = "NYGC_Cervical_eQTL", min_coloc = 0.2)
+
+#tracks("GENCODE v30" = ggnbp2_gencode, "sQTL junctions" = ggnbp2_junctions, heights = c(4,1))
+
+qtl_snps <- snp_plot(Gene = "GGNBP2", qtl = "NYGC_Cervical_eQTL", type = "QTL", min_coloc = 0.2, rs = FALSE)
+
+gwas_snps <- snp_plot(Gene = "GGNBP2", qtl = "NYGC_Cervical_eQTL", type = "GWAS")
+
+
+ggnbp2_plot <- tracks("GENCODE v30" = ggnbp2_gencode, 
+                 # "sQTL junctions" = ggnbp2_junctions,
+       "GWAS" = gwas_snps,
+       "QTL" = qtl_snps,
+       heights = c(10,1,2)
+) +
+  theme(panel.grid = element_blank(), axis.text = element_text(colour = "black"), axis.ticks = element_line(colour = "black") )
+
+
+ggnbp2_plot
+```
+
+
+## ACSL5
+
+```{r}
+ACSL5_gencode <- gencode_plot("ACSL5", 10)
+
+#ACSL5_junctions <- junction_plot(gene = "ACSL5", gwas = "Nicolas_2018", qtl = "NYGC_Cervical_eQTL", min_coloc = 0.2)
+
+#tracks("GENCODE v30" = ACSL5_gencode, "sQTL junctions" = ACSL5_junctions, heights = c(4,1))
+
+qtl_snps <- snp_plot(Gene = "ACSL5", qtl = "NYGC_Cervical_eQTL", type = "QTL", min_coloc = 0.2, rs = FALSE)
+
+gwas_snps <- snp_plot(Gene = "ACSL5", qtl = "NYGC_Cervical_eQTL", type = "GWAS")
+
+
+ACSL5_plot <- tracks("GENCODE v30" = ACSL5_gencode, 
+                 # "sQTL junctions" = ACSL5_junctions,
+       "GWAS" = gwas_snps,
+       "QTL" = qtl_snps,
+       heights = c(10,1,2)
+) +
+  theme(panel.grid = element_blank(), axis.text = element_text(colour = "black"), axis.ticks = element_line(colour = "black") )
+
+
+ACSL5_plot
+```
+
+ACSL5 is nice - lead GWAS SNP is lead QTL SNP.
+
+Nott data suggests only expressed in microglia - no ChIP or ATAC from any other cell type.
+However, none of the Microglia QTL data shows colocalisation.

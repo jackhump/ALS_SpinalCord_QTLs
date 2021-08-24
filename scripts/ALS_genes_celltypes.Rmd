@@ -1,0 +1,405 @@
+---
+title: "Cell-type specificity of prioritised genes"
+author: "Jack Humphrey"
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: haddock
+   code_folding: hide
+   toc: true
+   toc_float: true
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+```
+
+
+# COLOC genes and cell-type specificity
+
+```{r}
+library(tidyverse)
+library(patchwork)
+
+theme_jh <- function () { 
+    theme_bw(base_size=8, base_family="Helvetica") %+replace% 
+        theme(
+          panel.grid = element_blank(),
+          strip.background = element_blank(),
+          #panel.border = element_blank(),
+          axis.line = element_line(),
+          #text = element_text(color = "black"), 
+          strip.text = element_text(color = "black"),
+          axis.text = element_text(colour = "black"),
+          axis.ticks = element_line(colour = "black"),
+            panel.background  = element_blank(),
+            plot.background = element_rect(fill="white", colour=NA), 
+            legend.background = element_rect(fill="transparent", colour=NA),
+            legend.key = element_rect(fill="transparent", colour=NA), 
+            axis.line.y = element_line(), strip.text.x = element_text(face = "bold", margin = margin(t = 2,r = 0,b = 2,l=0))
+        )
+}
+
+load_results <- function(file){
+  load(file)
+  de_res <- de_res_final
+  tissues <- names(de_res)
+
+  # add tissue name as a column 
+  de_res <- 
+    purrr::map2(
+      .x = de_res,
+      .y = names(de_res), ~{
+        .x$tissue <- .y
+        return(.x)
+      })
+  return(de_res)
+}
+
+coloc_hits <- read_tsv( here::here("data/QTLs/Nov_2020/results/COLOC/SC_COLOC_hits.tsv")) %>%
+  filter( QTL %in% c("Cervical_eQTL", "Cervical_sQTL", "Lumbar_sQTL", "Lumbar_eQTL", "GTEX_sQTL_Brain_Spinal_cord_cervical_c-1","GTEX_Brain_Spinal_cord_cervical_c-1")) %>%
+  filter(PP.H4.abf > 0.7) %>%
+  filter(!grepl("^AL", QTL_Gene))
+
+nearest_genes <- read_tsv(here::here("data/QTLs/snp_nexus_nearest_gene_labels.tsv"))
+
+
+coloc_hits$nearest_gene <- nearest_genes$gene[match(coloc_hits$GWAS_SNP, nearest_genes$variant_id)]
+
+coloc_hits$locus <- (coloc_hits$nearest_gene) #, "\nP=", signif(coloc_hits$GWAS_P,digits = 2) )
+
+# remove duplicate loci
+coloc_hits <- filter(coloc_hits, locus != "SNAI1 P=6.7e-06" )
+
+
+coloc_genes <- unique(coloc_hits$QTL_Gene)
+
+coloc_loci <- coloc_hits %>% select(locus, GWAS_P, QTL_Gene) %>% distinct()
+
+coloc_loci_order <- select(coloc_loci, locus, GWAS_P) %>% distinct() %>% arrange(GWAS_P) %>% pull(locus)
+```
+
+# Overlap with modules
+
+```{r}
+
+load(here::here("data/WGCNA/ALS_signed_deep_split_4/model2_WGCNA_module_names.RData"))
+load(here::here("data/WGCNA/ALS_signed_deep_split_4/model2_WGCNA_eigengenes.RData"))
+
+kelley_modules <- read_tsv( here::here("ALS_SC/tables/networks/networks_kelley_markers_enrich.tsv") )
+
+activation_modules <- read_tsv( here::here("ALS_SC/tables/networks/networks_activation_enrich.tsv") )
+
+#all_markers <- bind_rows(kelley_modules, activation_modules)
+
+coloc_modules <- filter(gene_modules, genename %in% unique(coloc_hits$QTL_Gene) )
+
+module_plot <- function(res){
+  res %>%
+  left_join(coloc_loci, by = c("genename" = "QTL_Gene")) %>%
+  mutate( p.value = ifelse(p.value < 1e-16, 1e-16, p.value)) %>%
+  #filter(padj < 0.05) %>%
+  mutate(padj_label = ifelse(padj < 0.05, "*", "")) %>%
+  filter(!is.na(genename)) %>%
+  mutate(locus = factor(locus, levels = coloc_loci_order)) %>%
+  ggplot(aes(y = marker, x = genename, fill = -log10(p.value))) + geom_tile() +
+  scale_fill_gradient(expression(-log[10]~p-value), low = "white", high = "darkblue") +
+  geom_text( colour = "white", aes(label = padj_label), nudge_y = -0.2) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_discrete(expand = c(0,0), limits = rev) +
+  theme_jh() +
+  labs(x = "", y = "") +
+  theme_jh()  +
+  theme(axis.text.x = element_text(face = "italic")) +
+  facet_grid(~ locus,  scales = "free_x", space = "free_x")
+}
+
+module_plot( left_join(coloc_modules, kelley_modules))
+#kelley_modules <- 
+  
+kelley_module_plot <- module_plot( left_join(coloc_modules, kelley_modules))
+activation_module_plot <- module_plot( left_join(coloc_modules, activation_modules))
+
+kelley_module_plot
+```
+M40: FNBP1 and SH3RF1 are in the Oligo module!
+M18: NFASC is in an astrocyte module positively associated with disease duration
+M20: ACSL5 is in a module enriched with microglia activation genes but not microglia markers
+M39: MYO19 and PPP6R2 are both in a module enriched with gene expression terms AND downregulated in ALS
+M32: UN119 is in a module associated with gene expression
+M29: ATXN3 is in a module enriched in gene expression and translation
+M12: GCLM is enriched in a module upregulated in ALS
+M38: ZNHIT3 is in a module enriched in gene expression
+M30: C9orf72 and GGNBP2 are in a module upregulated in ALS associated with gene expression.
+
+
+Module membership - correlation of each ALS gene with each module eigengene
+
+```{r}
+load(here::here("data/WGCNA/module_membership.RData"))
+
+mm <- geneModuleMembership[ coloc_hits$QTL_Ensembl,] %>%
+  rownames_to_column(var = "ensemblID") %>%
+  mutate(gene = coloc_hits$QTL_Gene[ match(.$ensemblID, coloc_hits$QTL_Ensembl)]) %>%
+  pivot_longer(cols = !c(ensemblID, gene), names_to = "module", values_to = "cor") %>%
+  mutate(module = factor(module, levels = names(geneModuleMembership)))
+
+ mm %>% ggplot(aes(x = gene, y = module, fill = cor, label = cor)) + geom_tile()
+```
+
+
+
+
+Cell-type specificity using Kelley fidelity scores
+
+```{r}
+kelley_data <- read_tsv(here::here("data/kelley_markers/kelley_marker_gene_fidelity_all_tissues_combined.tsv.gz"))
+
+#kelley_markers <- split(kelley_data, kelley_data$set) %>% map_df( ~{ .x %>% arrange(desc(fidelity)) %>% mutate(fidelity = fidelity / max(fidelity) ) })
+
+## ALS
+kelley_gene_plot <- 
+  filter(kelley_data,Gene %in% coloc_hits$QTL_Gene ) %>%
+  mutate(set = gsub("ALL_", "", set)) %>%
+  mutate(set = gsub("Oligodendrocytes", "Oligos", set)) %>%
+  mutate(fidelity = signif(fidelity, 3)) %>%
+  arrange(desc(Gene)) %>%
+  mutate(Gene = factor(Gene, levels = rev(unique(.$Gene) ) )) %>%
+  left_join(coloc_loci, by = c("Gene" = "QTL_Gene")) %>%
+  mutate(locus = factor(locus, levels = coloc_loci_order)) %>%
+  ggplot(aes(y = set , x = Gene, label = fidelity, fill = fidelity)) + 
+  geom_tile() +
+  #geom_text() +
+  scale_fill_gradient( low = "white", high = "darkred", limits = c(-10,100)) +
+  #scale_fill_distiller(palette = 3, limits = c(-10,100)) +
+  scale_x_discrete(expand = c(0,0), position = "top") +
+  scale_y_discrete(expand = c(0,0), limits = rev,) +
+  theme_jh() +
+  theme(axis.text.x = element_text(face = "italic"), strip.placement.x= "outside") +
+  labs(fill = "Cell-type fidelity", x = "", y = "") +
+  facet_grid(~ locus,  scales = "free_x", space = "free_x") 
+
+kelley_gene_plot
+# ## cell-type specificity
+# kelley_cell <- 
+#   filter(kelley_markers,Gene %in% coloc_hits$QTL_Gene ) %>%
+#   mutate(set = gsub("ALL_", "", set)) %>%
+#   mutate(fidelity = signif(fidelity, 4)) %>%
+#   select(Gene,set, fidelity) %>%
+#   pivot_wider(names_from = set, values_from = fidelity) %>%
+#   column_to_rownames(var = "Gene") %>%
+#   t() %>%
+#   scale() %>%
+#   t() %>%
+#   pheatmap::pheatmap()
+# 
+# ggsave( plot = kelley_cell, )
+
+```
+FNBP1 is expressed in both oligodendrocytes and astrocytes
+ATXN3 is more specific to neurons
+SH3RF1 is most specific to neurons
+ACSL5 is most specific to astrocytes
+
+
+## Correlation to deconvolved proportions
+
+```{r}
+support <- read_tsv(here::here("data/differential_expression/ALS/ALS_all_differential_expression_support.tsv"))  %>%
+  mutate(duration = as.numeric(duration))
+
+mathys_music_resid <- read_tsv(here::here("data/deconvolution/Mathys_MuSiC_residual_results.tsv"))
+
+
+conversion_table <- data.frame(short = c("Ast","End", "Mic", "Ex", "Oli", "Per" ),
+                               long = c("Astrocytes", "Endothelial", "Microglia", "Neurons", "Oligos", "Pericytes")
+  )
+
+deconv_df <- mathys_music_resid  %>%
+  select(sample, cell, deconv) %>%
+  left_join(conversion_table, by = c("cell" = "short")) %>%
+  select(sample, cell = long, deconv)
+
+
+
+load(here::here("data/differential_expression/ALS/ALS_Spinal_Cord_count_matrices.RData"))
+
+
+# deconv_df <- deconv_res %>%
+#   pivot_longer(-sample) %>%
+#   left_join(support, by = "sample") %>%
+#   mutate(disease = factor(disease, levels = c("Control", "ALS"))) 
+
+## get cervical spinal cord gene expression for the colocalised genes
+# correlate their expression with deconvolution estimates in control samples only
+
+expression_df <- 
+  csc_df[unique(coloc_hits$QTL_Gene), ] %>%
+  rownames_to_column(var = "gene") %>%
+  pivot_longer(cols = !gene, names_to = "sample", values_to = "expression")
+
+### in ALS
+als_deconv_cor_res <- 
+  left_join(deconv_df, expression_df, by = "sample") %>%
+  left_join(support, by = "sample") %>%
+  filter(disease == "ALS") %>%
+  filter(!is.na(cell) ) %>%
+  filter( !grepl("^NA", gene) & !is.na(gene)) %>%
+  split( paste(.$cell, .$gene)) %>%
+  map_df( ~{ broom::tidy(cor.test(.x$expression, .x$deconv, method = "pearson"))}, .id = "cell_gene") %>%
+  tidyr::separate(col = cell_gene, sep = " ", into = c("cell", "gene")) %>%
+  mutate(padj = p.adjust(p.value, method = "bonferroni"))
+
+
+### in control
+control_deconv_cor_res <- 
+  left_join(deconv_df, expression_df, by = "sample") %>%
+  left_join(support, by = "sample") %>%
+  filter(disease == "Control") %>%
+  filter(!is.na(cell) ) %>%
+  filter( !grepl("^NA", gene) & !is.na(gene)) %>%
+  split( paste(.$cell, .$gene)) %>%
+  map_df( ~{ broom::tidy(cor.test(.x$expression, .x$deconv, method = "pearson"))}, .id = "cell_gene") %>%
+  tidyr::separate(col = cell_gene, sep = " ", into = c("cell", "gene")) %>%
+  mutate(padj = p.adjust(p.value, method = "bonferroni"))
+
+
+
+als_deconv_cor_plot <-
+  als_deconv_cor_res %>%
+    left_join(coloc_loci, by = c("gene" = "QTL_Gene")) %>%
+  #mutate( estimate = ifelse(estimate))
+  mutate(padj_label = ifelse(padj < 0.05, "*", "")) %>%
+  mutate(locus = factor(locus, levels = coloc_loci_order)) %>%
+  ggplot(aes(y = cell, x = gene, fill = estimate, label = padj_label) ) + 
+  geom_tile() + 
+  geom_text( colour = "white", aes(label = padj_label), nudge_y = -0.2) +
+  scale_fill_distiller(palette = "RdBu" ) + #, limits = c(-10,100)) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_discrete(expand = c(0,0), limits = rev) +
+  theme_jh() +
+  theme(axis.text.x = element_text(face = "italic")) +
+  labs(fill = "Pearson correlation", x = "", y = "" ) +
+  facet_grid(~ locus,  scales = "free_x", space = "free_x")
+
+
+control_deconv_cor_plot <-
+  control_deconv_cor_res %>%
+    left_join(coloc_loci, by = c("gene" = "QTL_Gene")) %>%
+  #mutate( estimate = ifelse(estimate))
+  mutate(padj_label = ifelse(padj < 0.05, "*", "")) %>%
+  mutate(locus = factor(locus, levels = coloc_loci_order)) %>%
+  ggplot(aes(y = cell, x = gene, fill = estimate, label = padj_label) ) + 
+  geom_tile() + 
+  geom_text( colour = "white", aes(label = padj_label), nudge_y = -0.2) +
+  scale_fill_distiller(palette = "RdBu" ) + #, limits = c(-10,100)) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_discrete(expand = c(0,0), limits = rev) +
+  theme_jh() +
+  theme(axis.text.x = element_text(face = "italic")) +
+  labs(fill = "Pearson correlation", x = "", y = "" ) +
+  facet_grid(~ locus,  scales = "free_x", space = "free_x")
+
+als_deconv_cor_plot
+
+control_deconv_cor_plot
+```
+
+
+# differential expression and duration associations
+
+```{r}
+
+als_res <- load_results(here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res.RData"))
+
+dur_res <- load_results(here::here("data/differential_expression/ALS/Model_8_limma_res.RData"))
+
+als_deg_plot <- 
+map_df( als_res, ~{ .x %>% filter(genename %in% coloc_hits$QTL_Gene ) }) %>%
+  arrange(adj_p_val) %>%
+    filter(tissue %in% c("CSC", "LSC")) %>%
+  select(genename, log_fc, adj_p_val, tissue) %>%
+  left_join(coloc_loci, by = c("genename" = "QTL_Gene")) %>%
+  mutate(padj_label = ifelse(adj_p_val < 0.05, "*", "")) %>%
+    mutate(locus = factor(locus, levels = coloc_loci_order)) %>%
+  ggplot(aes(x = genename, y = tissue, fill = log_fc, label = padj_label)) + 
+  geom_tile() + 
+  scale_fill_gradient2(expression(-log[2]~fold-change), low = "darkblue", mid = "white", high = "darkred") +
+  geom_text( colour = "white", aes(label = padj_label), nudge_y = -0.2) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_discrete(expand = c(0,0), limits = rev) +
+  theme_jh() +
+  labs(x = "", y = "") +
+  theme_jh()  +
+  theme(axis.text.x = element_text(face = "italic")) +
+  facet_grid(~ locus,  scales = "free_x", space = "free_x")
+
+
+
+dur_deg_plot <-
+map_df( dur_res, ~{ .x %>% filter(genename %in% coloc_hits$QTL_Gene ) }) %>%
+  filter(tissue %in% c("CSC", "LSC")) %>%
+  arrange(adj_p_val) %>%
+  select(genename, log_fc, adj_p_val, tissue) %>%
+  left_join(coloc_loci, by = c("genename" = "QTL_Gene")) %>%
+  mutate(padj_label = ifelse(adj_p_val < 0.05, "*", "")) %>%
+    mutate(locus = factor(locus, levels = coloc_loci_order)) %>%
+  ggplot(aes(x = genename, y = tissue, fill = log_fc, label = padj_label)) + 
+  geom_tile() + 
+  scale_fill_gradient2(expression(-log[2]~fold-change), low = "darkblue", mid = "white", high = "darkred") +
+  geom_text( colour = "white", aes(label = padj_label), nudge_y = -0.2) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_discrete(expand = c(0,0), limits = rev) +
+  theme_jh() +
+  labs(x = "", y = "") +
+  theme_jh()  +
+  theme(axis.text.x = element_text(face = "italic")) +
+  facet_grid(~ locus,  scales = "free_x", space = "free_x")
+
+```
+
+
+
+
+```{r fig.width = 8, fig.height = 5 }
+
+celltype_multiplot <- 
+kelley_gene_plot + theme(strip.text.x = element_text(face = "bold", size = 6), axis.text.x = element_text(face = "italic", size = 6) ) +
+kelley_module_plot + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.text.x = element_blank() ) +
+activation_module_plot + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.text.x = element_blank() ) +
+als_deconv_cor_plot + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.text.x = element_blank() ) +
+als_deg_plot + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.text.x = element_blank() ) +
+dur_deg_plot +   theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.text.x = element_blank()) +
+  plot_layout(ncol = 1, heights = c(4,4,5,6,2,2), guides = "collect")  &
+  theme(
+      axis.line = element_blank(),
+      strip.placement.x = "outside",
+      plot.margin = margin(), 
+      legend.key.size = unit(0.3, 'cm'),
+      legend.title = element_text(size = 6), 
+      legend.text = element_text(size =6),
+      panel.border = element_rect(size = 0.6, colour = "black", fill = NA),
+      panel.spacing.x =  unit(0, units = "pt")
+    )
+  
+  
+
+celltype_multiplot
+
+ggsave(plot = celltype_multiplot, filename = here::here("ALS_SC/plots/coloc_celltype_plot.pdf"), width = 8, height = 5)
+```
+
+write out control deconv cor plot
+
+```{r}
+control_deconv_cor_plot
+
+ggsave(plot = control_deconv_cor_plot, filename = here::here("ALS_SC/plots/coloc_control_cor_plot.pdf"), width = 9, height = 2)
+```
+

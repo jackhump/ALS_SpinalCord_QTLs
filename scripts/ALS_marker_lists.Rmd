@@ -1,0 +1,626 @@
+---
+title: "ALS marker lists"
+author: "Jack Humphrey"
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: haddock
+   code_folding: hide
+   toc: true
+   toc_float: true
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(homologene)
+
+
+named_list_to_df <- function(named_list){
+  map2_df( named_list, names(named_list), ~{
+    tibble( term_id = .y, gene = .x)
+  } )
+}
+
+```
+
+
+Prepare marker gene lists from published papers and datasets
+
+## Neuroexpresso
+
+```{r}
+nxp_files <- list.files(here::here("data/neuroexpresso/SpinalCord/"), full.names = TRUE)
+
+nxp_files <- c(here::here("data/neuroexpresso/Cortex_combined/Endothelial"), nxp_files)
+
+nxp <- purrr::map(nxp_files, ~{
+  mouse_genes <- readLines(.x) 
+  human_homologene <- homologene::homologene(mouse_genes, inTax = 10090, outTax = 9606 )
+  human_homologene <- human_homologene[!duplicated(human_homologene) | !duplicated(human_homologene),]$`9606`  
+  return(human_homologene)
+})
+names(nxp) <- basename(nxp_files)
+
+nxp$MotorNeuron <- nxp$SpinalCordCholinergic
+#nxp$Neuron <- c(nxp$GabaPV, nxp$GabaRelnCalb, nxp$GabaVIPReln, nxp$Pyramidal)
+
+nxp <- nxp[ c("MotorNeuron", "Oligo", "Microglia", "Astrocyte", "Endothelial")]
+#nxp <- nxp[ c("Neuron", "Oligo", "Microglia", "Endothelial", "Astrocyte")]
+
+save(nxp,file = here::here("data/markers/neuroexpresso_spinal_cord_human.RData"))
+
+```
+
+
+## Kelley - high fidelity genes
+
+```{r}
+kelley_data <- read_tsv(here::here("data/kelley_markers/kelley_marker_gene_fidelity_all_tissues_combined.tsv.gz"))
+kelley_markers <- split(kelley_data, kelley_data$set) %>% map( ~{arrange(.x, desc(fidelity) ) %>% head(100) %>% pull(Gene)})
+
+names(kelley_markers) <- c("Astrocytes", "Microglia", "Neurons", "Oligos")
+
+kelley <- named_list_to_df(kelley_markers) %>%
+   #mutate(term_id = gsub("ALL_", "", term_id)) %>%
+   #mutate(term_id = gsub("Oligodendrocyte", "Oligos", term_id)) %>%
+  split(.$term_id) %>%
+  map("gene")
+
+save(kelley, file = here::here("data/markers/kelley_markers.RData"))
+
+
+kelley_df <- named_list_to_df(kelley_markers)
+kelley_df$source <- "Kelley et al. 2018"
+kelley_df$PMID <- 30154505
+
+```
+
+
+## Panglaodb
+
+
+## Panglaodb
+
+```{r}
+pg <- read_tsv(here::here("data/Panglaodb/PanglaoDB_markers_27_Mar_2020.tsv.gz") ) %>% janitor::clean_names() %>%
+  filter(organ %in% c("Brain", "Vasculature", "Immune system"))
+
+pg_list <- select(pg, cell_type, official_gene_symbol) %>%
+  split(.$cell_type) %>%
+  map("official_gene_symbol")
+
+save(pg_list, file = here::here("data/markers/PanglaoDB_markers.RData"))
+
+```
+
+
+## Other markers
+
+Astrocyte activation markers from Zamanian et al, J Neurosci
+
+Liddelow Nature 2017 - reactive astrocytes - really a subset of Zamanian
+
+Boong Loong Teh Sci Rep 2017 - astrocytes treated with IL1beta , take top and bottom 50
+
+```{r fig.width = 10, fig.height = 8}
+clean_zamanian <- function(file){
+  df <- read_tsv(file)
+  mouse_genes <- df$`Gene symbol`
+  human_homologene <- homologene(mouse_genes, inTax = 10090, outTax = 9606 )
+  human_homologene <- human_homologene[!duplicated(human_homologene) | !duplicated(human_homologene),]$`9606`  
+  return(human_homologene)
+}
+
+zamanian <- list(Zamanian_MCAO = clean_zamanian(here::here("data/Astrocyte_lists/MCAO_genes.txt") ), 
+                 Zamanian_LPS = clean_zamanian(here::here("data/Astrocyte_lists/LPS_genes.txt") )
+)
+
+
+
+clean_liddelow <- function(file){
+  liddelow_genes <- read_tsv(file)
+  liddelow_genes <- split(liddelow_genes, liddelow_genes$set) %>%
+    map( ~{
+      mouse_genes <- .x$gene
+      human_homologene <- homologene(mouse_genes, inTax = 10090, outTax = 9606 )
+      human_homologene <- human_homologene[!duplicated(human_homologene) | !duplicated(human_homologene),]$`9606`
+      return(human_homologene)
+    })
+  return(liddelow_genes)
+}
+
+liddelow <- clean_liddelow(here::here("data/Astrocyte_lists/Liddelow_Astrocytes.txt"))
+
+clean_boon_loong_teh <- function(file){
+  df <- readxl::read_excel(file)
+  names(df) <- c("txid", "fold_change", "p_value", "gene", "description")
+
+  # clean out duplicate and multi genes
+  df <- df[ !grepl(";", df$gene),]
+  df <- df[ !duplicated(df$gene),]
+  
+  return(list( Teh_ILB1_up = head(df,50)$gene, Teh_ILB1_down = tail(df,50)$gene ))
+}
+
+teh_il1b <- clean_boon_loong_teh(here::here("data/Astrocyte_lists/Boon_Loong_Teh_Astrocyte_IL1B.xlsx"))
+
+astrocyte_sets <-c(zamanian,liddelow, teh_il1b)
+
+
+## Neuroexpresso activated
+clean_nxp_mg <- function(file){
+  mouse_genes <- readLines(file)
+  human_homologene <- homologene(mouse_genes, inTax = 10090, outTax = 9606 )
+  human_homologene <- human_homologene[!duplicated(human_homologene) | !duplicated(human_homologene),]$`9606`  
+  return(human_homologene)
+}
+
+nxp_mg <- clean_nxp_mg(here::here("data/neuroexpresso/All/Microglia_activation"))
+
+## SENSOME genes - from Direct RNA Sequencing Paper
+sensome_clean <- function(file){
+  df <- read.table(file, header=TRUE, stringsAsFactors = FALSE)
+  return(df$gene_name)
+}
+sensome <- sensome_clean(here::here("data/Microglia_lists/Sensome_genes.txt"))
+
+patir_core <- readLines(here::here("data/Microglia_lists/Patir_Microglia_core.txt"))
+
+dam_clean <- function(file){
+  df <- read.table(file)
+  return(df$gene_name)
+}
+
+dam_up <- dam_clean(here::here("data/Microglia_lists/DAM_UP.txt"))
+dam_down <- dam_clean(here::here("data/Microglia_lists/DAM_DOWN.txt"))
+
+pig_clean <- function(file){
+  mouse_genes <- readLines(file)
+  human_homologene <- homologene(mouse_genes, inTax = 10090, outTax = 9606 )
+  human_homologene <- human_homologene[!duplicated(human_homologene) | !duplicated(human_homologene),]$`9606`
+  return(human_homologene)
+}
+
+pig_genes <- pig_clean(here::here("data/Microglia_lists/De_Strooper_PIG_genes.txt"))
+
+
+
+# Habib Disease-associated Astrocytes
+clean_habib <- function(file){
+  d <- readxl::read_excel(here::here(file), sheet =  2, skip =  6) %>%
+    janitor::clean_names()
+  mouse_genes <- filter(d, 
+                cluster_id_number_1 == 1 & 
+                  cluster_id_number_2 == 4 & 
+                  avg_log_fold_change_number_1_number_2 < 0) %>%
+    pull(gene)
+  human_homologene <- homologene(mouse_genes, inTax = 10090, outTax = 9606 )
+  human_homologene <- human_homologene[!duplicated(human_homologene) | !duplicated(human_homologene),]$`9606`
+  return(human_homologene)
+}
+
+daa_genes <- clean_habib(here::here("data/Astrocyte_lists/Habib_DAA_supp.xlsx"))
+
+writeLines(daa_genes,con =  here::here("data/Astrocyte_lists/Habib_DAA_genes.tsv"))
+```
+
+Join together sets of activation  genes
+
+```{r fig.height = 6, fig.width = 7}
+activation_sets <- list(
+  #"Activated microglia" = nxp_mg,
+  "Disease-associated microglia" = dam_up,
+  "Reactive astrocytes - MCAO" = zamanian$Zamanian_MCAO,
+  "Reactive astrocytes - LPS" = zamanian$Zamanian_LPS,
+  "Disease-associated astrocytes" = daa_genes,
+  "Plaque-induced genes" = pig_genes
+  )
+
+
+save(activation_sets, file = here::here("data/markers/activation_markers.RData"))
+
+
+
+activation_df <- named_list_to_df(activation_sets)
+
+activation_meta <- tibble(
+  term_id = names(activation_sets),
+  source = c(
+    "Keren-Shaul et al. 2017",
+    "Zamanian et al. 2012"
+    "Zamanian et al. 2012",
+    "Habib et al. 2020",
+    "Chen et al. 2020 "
+  ),
+  PMID = c(
+    28602351,
+    22553043,
+    22553043,
+    32341542,
+    32702314
+  )
+)
+
+activation_df <- left_join(activation_df, activation_meta, by = "term_id")
+
+supp_gene_table <- bind_rows(kelley_df, activation_df) 
+
+# add Ensembl IDs
+
+gene_meta <- read_tsv(here::here("data/misc/gencode.v30.tx2gene.tsv.gz") )%>%
+  janitor::clean_names() %>%
+  select(genename, geneid) %>%
+  distinct() %>%
+  mutate( geneid = str_split_fixed(geneid, "\\.", 2)[,1] )
+
+
+# drop any gene without a matching Ensembl ID - these are probably archaic gene names, would have been ignored by GSEA.
+
+supp_gene_table$EnsemblID <- gene_meta$geneid[ match( supp_gene_table$gene, gene_meta$genename) ]
+
+
+supp_gene_table <- select(supp_gene_table, gene, EnsemblID, everything() ) %>%
+  drop_na()
+
+write_tsv(supp_gene_table, file = "../../ALS_SC/tables/all_marker_activation_genes.tsv")
+
+```
+
+Compare Kelley microglia and astrocyte markers to activation sets
+
+```{r}
+load(here::here("data/markers/activation_markers.RData"))
+load(here::here("data/markers/kelley_markers.RData"))
+
+all_markers <- c(activation_sets, list("Astrocytes (Kelley)" = kelley$Astrocytes, "Microglia (Kelley)" = kelley$Microglia) )
+
+# do UpsetR plot
+upset_plot <- UpSetR::upset(UpSetR::fromList(all_markers), nsets = length(all_markers),set_size.show = TRUE,order.by = "freq" )
+
+pdf(file = "../../ALS_SC/plots/glia_activation_sets.pdf", width = 7, height = 5); upset_plot; dev.off()
+```
+
+
+
+## Maniatis spatial transcriptomics modules
+
+```{r}
+maniatis <- readxl::read_excel(here::here("data/Maniatis_ST/table_S8.xlsx"), sheet = 1, skip = 3) %>%
+  pivot_longer(cols = everything() ) %>%
+  filter(!is.na(value)) %>%
+  rename(term_id = name, gene = value)
+
+write_tsv(maniatis, file = here::here("data/markers/maniatis_modules.tsv"))
+
+# maniatis_gsea_res <- 
+#   map_df( de_res, ~{
+#   customGSEA(.x, gsea_set = maniatis, orderby = "t") #, n = 5000)
+#   }, .id = "tissue") 
+# 
+# gsea_plot(maniatis_gsea_res) + coord_flip()
+# 
+# # consensus changing modules 
+# # up:
+# # 22, 23, 24, 26, 16, 10
+# # down: 3,4
+# # module 16 and 26 has no KEGG terms - don't read in
+# modules <-  c(3,4,10,22,23,24)
+# maniatis_modules <- map_df( modules,
+#                    ~{readxl::read_excel("../../data/Maniatis_ST/table_S9.xlsx", sheet = .x, col_types = c("skip", "text", "text", "numeric", "numeric", "text")) %>% mutate(Module = .x) %>% select(Module, everything() ) })
+
+
+
+
+```
+
+GSEA shows enrichment of several Maniatis ST modules. Modules 3 and 4 are downregulated across tissues. Using the KEGG results from Maniatis, these modules are enriched for synaptic terms and oxidative phosphorylation. Modules 22,23,24,26,16, and 10 are upregulated. These modules are enriched for Ribosomal genes, Lysosome,  and infection responses. 
+
+
+
+## d'Erchia differential expressed genes
+
+d'Erchia synaptic genes
+
+
+```{r}
+derchia_cells <- read_delim(here::here("data/Derchia_Spinal_Cord/derchia_cell_type_genes.txt"), delim = " ")
+
+gsea_box_plots("LSC", derchia_cells) +
+gsea_box_plots("CSC",derchia_cells) +
+gsea_box_plots("TSC", derchia_cells) +
+  plot_layout(nrow = 3)
+# most d'erchia motor neuron markers are not present in differential expression due to lowly expressed gene cutoff.
+
+mn_genes <- filter(derchia_cells, term_id == "Motor_Neuron")
+
+derchia_marker_df <- 
+  all_sc_df %>%
+  rownames_to_column(var = "gene") %>%
+  inner_join(derchia_cells, by = "gene") %>%
+  pivot_longer(names_to = "sample", -c(gene,term_id) )  %>%
+  left_join(support, by = "sample")
+
+derchia_marker_df %>% 
+  ggplot(aes(x = sample, y = gene, fill = value)) + geom_tile() + facet_wrap(~term_id, ncol = 1, scales = "free")
+
+
+#map(mn_genes$gene, ~{gene_plot(.x, df = lsc_df)})
+# most motor neuron marker genes are too lowly expressed and are not tested.
+
+derchia_degs <- read_delim(here::here("data/Derchia_Spinal_Cord/derchia_deg_results.txt"), delim = " ")
+
+de_res$LSC  %>%
+  left_join(derchia_degs, by = c("genename" = "gene")) %>%
+  ggplot(aes(x = log_fc, y = cd2_log2_fold_change)) +
+  geom_point(aes(colour = adj_p_val < 0.05)) +
+  labs(x = "Log2 Fold Change", y = "d'Erchia Log2 Fold Change") +
+  ggpubr::stat_cor() +
+
+de_res$CSC %>%
+  left_join(derchia_degs, by = c("genename" = "gene")) %>%
+  ggplot(aes(x = log_fc, y = cd2_log2_fold_change)) +
+  geom_point() +
+  labs(x = "Log2 Fold Change", y = "d'Erchia Log2 Fold Change") +
+  ggpubr::stat_cor()  +
+
+de_res$TSC  %>%
+  left_join(derchia_degs, by = c("genename" = "gene")) %>%
+  ggplot(aes(x = log_fc, y = cd2_log2_fold_change)) +
+  geom_point() +
+  labs(x = "Log2 Fold Change", y = "d'Erchia Log2 Fold Change") +
+  ggpubr::stat_cor() +
+    plot_layout(nrow = 1) &
+    theme_jh()
+
+
+```
+
+Krach differentially expressed genes
+
+```{r}
+krach_degs <- readxl::read_excel(here::here("data/Krach_MNs/krach_sm1.xlsx"), sheet = 1)
+
+de_res$LSC  %>%
+  left_join(krach_degs, by = c("genename" = "gene_name")) %>%
+  #filter(adj_p_val < 0.05) %>%
+  ggplot(aes(x = log_fc, y = log2FoldChange)) +
+  geom_point(aes(colour = adj_p_val < 0.05)) +
+  labs(x = "Log2 Fold Change", y = "Krach Log2 Fold Change") +
+  ggpubr::stat_cor() +
+    plot_layout(nrow = 1) &
+    theme_jh()
+
+de_res$CSC  %>%
+  left_join(krach_degs, by = c("genename" = "gene_name")) %>%
+  left_join(nxp_gsea, by = c("genename" = "gene")) %>%
+  ggplot(aes(x = log_fc, y = log2FoldChange, colour = term_id)) +
+  geom_point() +
+  labs(x = "Log2 Fold Change", y = "Krach Log2 Fold Change") +
+  ggpubr::stat_cor() +
+  facet_wrap(~term_id) +
+  geom_vline(xintercept = 0, linetype = 3) +
+  geom_hline(yintercept = 0, linetype =3 )+
+    theme_jh()
+
+```
+
+The microglia upregulation signature is retained in Krach.
+
+
+## Zhou AD oligos
+
+```{r}
+
+zhou_oli0_degs <- readxl::read_excel("../../data/Zhou_reactive_oligos/zhou_supp_tables.xlsx", sheet = "Oli0", skip = 4)
+
+de_res$CSC  %>%
+  left_join(zhou_oli0_degs, by = c("genename" = "gene")) %>%
+  ggplot(aes(x = log_fc, y = avg_logFC)) +
+  geom_point() +
+  labs(x = "Log2 Fold Change", y = "Zhou Log2 Fold Change") +
+  ggpubr::stat_cor() +
+  geom_vline(xintercept = 0, linetype = 3) +
+  geom_hline(yintercept = 0, linetype =3 )+
+    theme_jh()
+
+
+
+
+zhou_oli0_markers <- readxl::read_excel("../../data/Zhou_reactive_oligos/zhou_supp_tables.xlsx", sheet = "Oligo0_Cluster_Marker", skip = 3) %>% mutate(term_id = "Zhou_Oli0") %>% select(term_id, gene)
+
+zhou_oli1_markers <- readxl::read_excel("../../data/Zhou_reactive_oligos/zhou_supp_tables.xlsx", sheet = "Oligo1_Cluster_Marker", skip = 3) %>%  mutate(term_id = "Zhou_Oli1") %>% select(term_id, gene)
+
+
+zhou_oli_markers <- bind_rows(zhou_oli0_markers, zhou_oli1_markers)
+
+zhou_oli_gsea_res <- 
+  map_df( de_res, ~{
+  customGSEA(.x, gsea_set = zhou_oli_markers, orderby = "t") #, n = 5000)
+  }, .id = "tissue") 
+
+gsea_plot(zhou_oli_gsea_res) + coord_flip()
+
+
+gsea_box_plots("CSC", zhou_oli_markers) +
+  gsea_box_plots("TSC", zhou_oli_markers) +
+  gsea_box_plots("LSC", zhou_oli_markers)
+
+```
+
+## Falcao Oligodendrocytes
+
+Mice treated with EAE and then snRNA-seq.  
+Differential expression results for OPCs and mature oligos (MOLs), EAE vs control.
+
+```{r}
+
+clean_falcao <- function(sheet, cell_type, cutoff = 100){
+  gene_list <- readxl::read_excel(here::here("data/Falcao_Oligos/table_S3.xlsx"), sheet = sheet, col_names = c("gene", "control", "EAE"), skip = 1 ) %>%
+    arrange(desc(abs(EAE) )) %>%
+      mutate(term_id = case_when(EAE > 0 ~ paste(cell_type, "EAE UP"),
+                             EAE < 0 ~ paste(cell_type, "EAE DOWN") ) ) %>%
+      select(gene, term_id) %>% 
+      filter(!is.na(term_id) & !is.na(gene)) %>%
+    split(.$term_id, ) %>%
+    map( ~{ 
+      .x <- head(.x, cutoff)
+    # convert to human
+    human_homologene <- homologene(.x$gene, inTax = 10090, outTax = 9606 )
+    human_homologene <- human_homologene[!duplicated(human_homologene) | !duplicated(human_homologene),]$`9606` 
+    return(human_homologene)
+    }) %>%
+    named_list_to_df()
+  return(gene_list)
+}
+
+falcao_opcs <- clean_falcao(sheet = "DIFF_OPC_ControlVSEAE", cell_type = "OPC")
+falcao_mols <- clean_falcao(sheet = "DIFF_MOL_ControlVSEAE", cell_type = "MOL")
+
+falcao_all <- bind_rows(falcao_opcs, falcao_mols)
+
+falcao_oli_gsea_res <- 
+  map_df( de_res, ~{
+  customGSEA(.x, gsea_set = falcao_all, orderby = "t") #, n = 5000)
+  }, .id = "tissue") 
+
+gsea_plot(falcao_oli_gsea_res) + coord_flip()
+
+
+gsea_box_plots("CSC", falcao_all)
+```
+
+ALS downregulated DEGs enriched for genes that downregulate in mouse oligodendrocytes in response to MS model.
+
+
+## Voskuhl Oligodendrocytes
+
+https://www.pnas.org/content/116/20/10130.full
+
+table 1 - human MS brain regions vs control
+table 2 - cell type markers from Zhang, would be good to look at OPCs and new Oligos
+table 3 - mouse RNA-seq using oligo ribotag, logFC is remyleniation response to cuprizone treatment
+
+
+```{r}
+voskuhl_deg <- readxl::read_excel("../../data/Voskuhl_Oligos/table_3.xlsx", sheet = 1) %>% janitor::clean_names() %>%
+  mutate(term_id = case_when(
+    log_fc_remyelination >= 2 ~ "Oligo remyelination UP",
+    log_fc_remyelination <= -2 ~ "Oligo remyelination DOWN"
+  )) %>%
+  select(gene, term_id) %>%
+      split(.$term_id, ) %>%
+    map( ~{ 
+    # convert to human
+    human_homologene <- homologene(.x$gene, inTax = 10090, outTax = 9606 )
+    human_homologene <- human_homologene[!duplicated(human_homologene) | !duplicated(human_homologene),]$`9606` 
+    return(human_homologene)
+    }) %>%
+    named_list_to_df()
+
+
+voskuhl_oli_gsea_res <- 
+  map_df( de_res, ~{
+  customGSEA(.x, gsea_set = voskuhl_deg, orderby = "t") #, n = 5000)
+  }, .id = "tissue") 
+
+gsea_plot(voskuhl_oli_gsea_res) + coord_flip()
+
+
+gsea_box_plots("CSC", voskuhl_deg) +
+  gsea_box_plots("LSC", voskuhl_deg) +
+gsea_box_plots("TSC", voskuhl_deg)
+
+volcano_plot(de_res = de_res$LSC, annotate_by = voskuhl_deg$gene, title = NULL)
+
+
+filter(de_res$LSC, genename %in% voskuhl_deg$gene) %>% left_join(voskuhl_deg, by = c("genename" = "gene") )
+```
+
+GPNMB and CD74 are downregulated during remyelination 
+
+Oligo expression in ALS resembles remyelination in reverse - genes downregulated in ALS resemble genes that are upregulated during remyelination following cuprizone treatment.
+
+## Zhang cell type markers from Voskuhl
+
+```{r}
+zhang_markers <- readxl::read_excel("../../data/Voskuhl_Oligos/table_2.xlsx") %>%
+  pivot_longer(names_to = "term_id", values_to = "gene", cols = everything()) %>%
+  split(.$term_id) %>%
+  map(~{ 
+    # convert to human
+    human_homologene <- homologene(.x$gene, inTax = 10090, outTax = 9606 )
+    human_homologene <- human_homologene[!duplicated(human_homologene) | !duplicated(human_homologene),]$`9606` 
+    return(human_homologene)
+    }) %>%
+    named_list_to_df()
+
+zhang_gsea_res <-   map_df( de_res, ~{
+  customGSEA(.x, gsea_set = zhang_markers, orderby = "t") #, n = 5000)
+  }, .id = "tissue") 
+
+gsea_plot(zhang_gsea_res) + coord_flip()
+
+
+gsea_box_plots("CSC", zhang_markers ) +
+  gsea_box_plots("LSC", zhang_markers ) +
+gsea_box_plots("TSC", zhang_markers ) +
+  plot_layout(ncol = 1) &
+  coord_flip() 
+
+
+```
+
+
+Myelinating and Newly Formed Oligos are both downregulated in all three tissues.
+
+# Blum Mouse Spinal Cord single cell
+
+```{r}
+
+# supp table 2 - provided by Jacob Blum as the the uploaded table was mangled
+blum <- readxl::read_excel(here::here("data/Blum_Spinal_Cord/FIXED Supplemental Table S2.xlsx"), sheet = 2, skip =1)
+
+# cluster cell types come from supp table 1
+blum_clusters <- 
+  tibble::tribble(
+    ~cholinergic.cells, ~cholinergic.cells, ~cholinergic.cells, ~cholinergic.cells, ~cholinergic.cells, ~cholinergic.cells, ~cholinergic.cells, ~cholinergic.cells, ~cholinergic.cells, ~cholinergic.cells, ~cholinergic.cells, ~cholinergic.cells, ~cholinergic.cells, ~excitatory.interneurons, ~excitatory.interneurons, ~excitatory.interneurons, ~excitatory.interneurons, ~excitatory.interneurons, ~excitatory.interneurons, ~excitatory.interneurons, ~excitatory.interneurons, ~inhibitory.interneurons, ~inhibitory.interneurons, ~inhibitory.interneurons, ~inhibitory.interneurons, ~inhibitory.interneurons, ~inhibitory.interneurons, ~inhibitory.interneurons, ~inhibitory.interneurons, ~oligodendrocytes, ~oligodendrocytes, ~oligodendrocytes, ~astrocytes, ~microglis, ~endothelial.cells, ~endothelial.cells,
+                   25L,                13L,                28L,                29L,                11L,                23L,                17L,                 4L,                 8L,                34L,                21L,                30L,                36L,                      19L,                      18L,                      31L,                       1L,                      20L,                      37L,                      33L,                      38L,                       0L,                       5L,                       7L,                      14L,                      32L,                      27L,                      15L,                      24L,                9L,                2L,               35L,          3L,        10L,                16L,                22L
+    ) %>%
+pivot_longer( cols = everything(), names_to = "cell_type", values_to = "cluster" ) 
+
+blum_markers <- 
+  left_join(blum, blum_clusters ,by = "cluster") %>%
+  #filter(avg_logFC > 1) %>%
+  arrange(desc(avg_logFC)) %>%
+  unite(col = term_id,sep = "_", cell_type, cluster) %>%
+  select(term_id, gene) %>%
+    split(.$term_id) %>%
+  map(~{ 
+    .x <- head(.x, 50)
+    # convert to human
+    human_homologene <- homologene(.x$gene, inTax = 10090, outTax = 9606 )
+    human_homologene <- human_homologene[!duplicated(human_homologene) | !duplicated(human_homologene),]$`9606` 
+    return(human_homologene)
+    }) %>%
+  named_list_to_df()
+
+blum_gsea_res <-   map_df( de_res, ~{
+  customGSEA(.x, gsea_set = blum_markers, orderby = "t") #, n = 5000)
+  }, .id = "tissue") 
+
+gsea_plot(blum_gsea_res)
+
+gsea_box_plots("CSC", blum_markers )
+
+
+
+```
+
+
+

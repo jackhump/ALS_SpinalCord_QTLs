@@ -1,0 +1,794 @@
+---
+title: "ALS DEG Functions"
+author: |
+  | Jack Humphrey
+  | Raj Lab
+  | Department of Neuroscience
+  | Icahn School of Medicine at Mount Sinai
+  | NYC, New York
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: haddock
+   code_folding: hide
+   toc: true
+   toc_float: true
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.height = 8, fig.width = 10)
+library(tidyverse)
+#library(ggfortify)
+library(patchwork)
+library(pheatmap)
+#library(gprofiler2)
+#library(enrichR)
+#library(gt)
+library(ggrastr)
+
+library(clusterProfiler)
+#library(ComplexHeatmap)
+#library(tidyHeatmap)
+
+theme_jh <- function () { 
+    theme_bw(base_size=8) %+replace% 
+        theme(
+          panel.grid = element_blank(),
+          strip.background = element_blank(),
+          #panel.border = element_blank(),
+          axis.line = element_line(),
+          #text = element_text(color = "black"), 
+          strip.text = element_text(color = "black"),
+          axis.text = element_text(colour = "black"),
+            panel.background  = element_blank(),
+            plot.background = element_rect(fill="white", colour=NA), 
+            legend.background = element_rect(fill="transparent", colour=NA),
+            legend.key = element_rect(fill="transparent", colour=NA), 
+            axis.line.y = element_line(), strip.text.x = element_text(face = "bold", margin = margin(t = 2,r = 0,b = 2,l=0))
+        )
+}
+
+
+createDT <- function(DF, caption="", scrollY=500){
+  data <- DT::datatable(DF, caption=caption,
+    extensions =  'Buttons',
+    options = list( dom = 'Bfrtip', 
+                    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'), 
+                    scrollY = scrollY, scrollX=T, scrollCollapse = T, paging = F,  
+                      columnDefs = list(list(className = 'dt-center', targets = "_all"))
+    )
+  ) 
+   return(data)
+}
+
+
+rerun <- TRUE
+```
+
+Assess the functions of the differentially expressed genes using the following tools:
+
+Gene Ontology enrichment using clusterProfiler
+
+
+```{r fig.width = 12, fig.height = 10}
+
+#load(file = here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res.RData"))
+#de_res <- de_res_final
+#load(file = here::here("data/differential_expression/ALS/Model_8d_limma_res.RData"))
+#load(here::here("data/differential_expression/ALS/Model_9e_limma_res.RData")) 
+#de_res <- de_res_9e
+#names(de_res) <- c("LSC", "CSC", "TSC")
+#de_res <- model_8_final
+
+
+#de_res <- de_res_final
+load_results <- function(file){
+  load(file)
+  de_res <- de_res_final
+  tissues <- names(de_res)
+
+  # add tissue name as a column 
+  de_res <- 
+    purrr::map2(
+      .x = de_res,
+      .y = names(de_res), ~{
+        .x$tissue <- .y
+        return(.x)
+      })
+  return(de_res)
+}
+
+make_gene_sets <- function(de_res){
+  
+  # for each result split by direction and get out lists of genes
+  
+  # output only significant up and downregulated genes
+  gene_sets_sig <- 
+    map_df(de_res, ~{.x}) %>%
+    mutate(direction = ifelse( log_fc > 0, "up", "down") ) %>%
+    mutate( set = paste(tissue, direction, sep = ":")) %>%
+    filter(adj_p_val < 0.05) %>%
+    split(.$set) %>%
+    map("genename") #%>%
+  #map( ~{ head(.x, 1000)})
+  
+  # output top X genes sorted by P-value, even if not sig at FDR < 0.05
+  gene_sets_top <-
+    map_df(de_res, ~{.x}) %>%
+    mutate(direction = ifelse( log_fc > 0, "up", "down") ) %>%
+    mutate( set = paste(tissue, direction, sep = ":")) %>%
+    split(.$set) %>%
+    map("genename") %>%
+    map( ~{ head(.x, 250)})
+  
+  tissues <- names(de_res)
+  
+  tissue_sets <- expand.grid(tissues, c("up","down"), stringsAsFactors = FALSE)
+  names(tissue_sets) <- c("tissue", "direction")
+  tissue_sets$set <- paste(tissue_sets$tissue, tissue_sets$direction, sep = ":")
+  
+  gene_sets_top <- gene_sets_top[ tissue_sets$set]
+  
+  gene_sets_tstat <-
+    map(de_res, ~{
+      .x <- 
+        .x %>%
+        #filter(adj_p_val < 0.05) %>%
+        arrange( desc(t) )
+      tstat <- .x$t
+      names(tstat) <- .x$genename
+      return(tstat)
+    })
+  
+  gene_sets_lfc <-
+    map(de_res, ~{
+      .x <- .x %>%
+        filter(p_value < 0.05) %>%
+        arrange( desc(log_fc) )
+      lfc <- .x$log_fc
+      names(lfc) <- .x$genename
+      return(lfc)
+    })
+  
+  return(
+    list(sig = gene_sets_sig, top = gene_sets_top, t = gene_sets_tstat, lfc = gene_sets_lfc)
+  ) 
+}
+
+ma_plot <- function(de_res, title = NULL, annotate_by = NULL){
+   de_res <- 
+    mutate(de_res,
+           class = case_when(
+      adj_p_val >= 0.05 ~ "non_sig",
+      adj_p_val < 0.05 & abs(log_fc) < 1 ~ "sig",
+      adj_p_val < 0.05 & abs(log_fc) >= 1 ~ "sig - strong"
+    )) 
+  
+  plot <- de_res %>%
+    ggplot(aes(x = ave_expr, y = log_fc)) + 
+    rasterise(geom_point(aes(colour = class ), size = 0.5), dpi = 300) +
+    scale_colour_manual(values = c("gray", "orange", "red")) +
+    theme_bw() +
+        labs(x = "log(average expression)", y =  expression(log[2]~"(fold change)"), title = title) +
+    guides(colour = FALSE) +
+    #xlim(-2,4.6) +
+    ylim(-4.5,4.5) +
+    theme_jh()
+  
+  if(!is.null(annotate_by)){
+    plot <- plot + 
+      ggrepel::geom_text_repel(
+        fontface = "italic",
+        data = filter(de_res, genename %in% annotate_by), 
+        aes(x = log_fc, y = -log10(p_value), label = genename), 
+        min.segment.length = unit(0, "lines"),
+        size = 2.5) +
+      geom_point(
+        data = filter(de_res, genename %in% annotate_by), size = 0.8, colour = "black"
+      ) +
+      geom_point(aes(colour = class ),
+        data = filter(de_res, genename %in% annotate_by), size = 0.6
+      )
+    
+  }
+  return(plot)
+  
+}
+
+volcano_plot <- function(de_res, title = NULL, subtitle = NULL, annotate_by = NULL, type = "ALS"){
+  de_res <- 
+    mutate(de_res,
+           sig = case_when(
+      adj_p_val >= 0.05 ~ "non_sig",
+      adj_p_val < 0.05 & abs(log_fc) < 1 ~ "sig",
+      adj_p_val < 0.05 & abs(log_fc) >= 1 ~ "sig - strong"
+    )) %>%
+    mutate(direction = ifelse(log_fc > 0, "up", "down")) %>%
+    mutate(log_fc = case_when(
+      log_fc > 3 ~ Inf,
+    log_fc < -3 ~ -Inf,
+    TRUE ~ log_fc
+    )) %>%
+    mutate(class = paste(sig, direction))
+  
+  if( type == "ALS"){
+    xpos <- 0.5
+    ymax <- 16.5
+    xlim <- c(-3,3)
+  }else{
+    xpos <- 0.025
+    ymax <- 8.5
+    xlim <- c(-0.042, 0.042)
+  }
+  
+  de_tally <- group_by(de_res, sig, direction, class) %>% tally() %>%
+    filter(sig != "non_sig") %>%
+    mutate( position = ifelse(sig == "sig", xpos, 2) ) %>%
+    mutate(position = ifelse( direction == "down", -1 * position, position)) %>%
+    mutate(n = formatC(n, format="f", big.mark=",", digits=0))
+  
+  plot <- de_res %>%
+    mutate( p_value = ifelse( p_value < 1e-16, Inf, p_value)) %>% #threshold at 1e16
+    ggplot(aes(x = log_fc, y = -log10(p_value))) + 
+    #geom_point(aes(colour = class ), size = 0.5) +
+    rasterise(geom_point(aes(colour = class ), size = 0.5), dpi = 300) +
+    scale_colour_manual(values = c("non_sig up" = "gray", 
+                                   "non_sig down" = "gray",
+                                   "sig up" = "#EB7F56", 
+                                   "sig - strong up" = "#B61927",
+                                   "sig down" = "#4F8FC4",
+                                   "sig - strong down" = "dodgerblue4"
+                                   )) +
+    theme_bw() +
+    labs(y = expression(-log[10]~P~value), x = expression(log[2]~"(fold change)"), title = title, subtitle = subtitle) +
+    guides(colour = FALSE) +
+    scale_y_continuous(expand = c(0,0), limits = c(0,ymax)) +
+    theme_jh() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5),
+      panel.border = element_blank(),
+      axis.ticks = element_line(colour = "black")
+    ) +
+    geom_text(fontface = "bold", data = de_tally, aes(x = position, y = ymax - 0.5, label = n, colour = class), size = 2.5 ) +
+    scale_x_continuous(limits = xlim)
+  
+  if(!is.null(annotate_by)){
+    plot <- plot + 
+      ggrepel::geom_text_repel(
+        fontface = "italic",
+        data = filter(de_res, genename %in% annotate_by), 
+        aes(x = log_fc, y = -log10(p_value), label = genename), 
+        min.segment.length = unit(0, "lines"),
+        size = 2.5) +
+      geom_point(
+        data = filter(de_res, genename %in% annotate_by), size = 0.8, colour = "black"
+      ) +
+      geom_point(aes(colour = class ),
+        data = filter(de_res, genename %in% annotate_by), size = 0.6
+      )
+    
+  }
+  return(plot)
+  
+}
+
+## GSEA
+named_list_to_df <- function(named_list){
+  map2_df( named_list, names(named_list), ~{
+    tibble( term_id = .y, gene = .x)
+  } )
+}
+
+
+
+gsea_plot <- function(data){
+  if("set" %in% names(data)){
+    data$tissue <- data$set
+  } 
+  data %>%
+  #filter(tissue %in% tissues ) %>%
+  #mutate(tissue = factor(tissue, levels =) %>%
+  mutate(padj = p.adjust(pvalue, method = "bonferroni")) %>%
+  mutate(padj_label = case_when(
+    padj < 0.0001 ~ "***",
+    padj < 0.001 ~ "**",
+    padj < 0.05 ~ "*",
+    TRUE ~ "."
+    )) %>%
+  #mutate(sig = ifelse(padj < 0.05, "*", "")) %>%
+  mutate(NES_label = signif(NES, digits = 2)) %>%
+  ggplot(aes( x = tissue, y = ID)) + 
+  geom_tile(aes(fill = NES)) + 
+  scale_fill_distiller(type = "div", palette = "RdBu", limits = c(-4.2,4.2)) + 
+  #eom_tile(aes(colour = padj < 0.05), fill = NA, size = 2 ) +
+  scale_colour_manual(values = c(NA, "white")) +
+  geom_text(aes(label = padj_label)) +
+  #geom_text(aes(label = padj_label), nudge_x = 0.25, nudge_y = 0.25, size = 5) +
+  scale_y_discrete(expand = c(0,0)) +
+  theme_jh() +
+  labs(x = "", y = "") +
+  scale_x_discrete(expand = c(0,0), position = "top") +
+    theme(axis.line = element_blank() )
+}
+
+# plot log2 fold changes of marker genes (nominal P < 0.05)
+gsea_box_plots <- function(res, markers, measure = "log_fc"){
+  if( !is.data.frame(markers)){
+    markers <- named_list_to_df(markers)
+  }
+  if( measure == "log_fc"){
+    measure_string <- expression(log[2]~Fold~Change)
+  }else{
+    measure_string <- measure
+  }
+  d <- res %>%
+    bind_rows() %>%
+    inner_join(markers, by = c("genename" = "gene")) %>%
+    filter( p_value < 0.05)
+  
+  d %>%
+  mutate( FDR = ifelse(adj_p_val < 0.05, yes = "< 0.05", no = "> 0.05") ) %>%
+  #mutate(term_id = str_sub(term_id, start = 1, end = 1)) %>%
+  ggplot(aes_string(x = "term_id", y = measure )) + 
+  geom_jitter(width = 0.25, size = 1, aes(colour = FDR) ) +
+  geom_boxplot(outlier.color = NA, fill = NA) + 
+  scale_colour_manual( values = c("> 0.05" = "gray", "< 0.05" = "maroon") ) + 
+  theme_jh() +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs( x = "", y = measure_string) +
+  coord_flip() +
+    facet_wrap(~tissue)
+}
+```
+
+MSigDB - hallmark gene sets
+
+```{r}
+hallmark_file <- here::here("data/MSigDB/h.all.v7.2.symbols.gmt")
+hallmarks <- read.gmt(hallmark_file) %>%
+  mutate(term = gsub("HALLMARK|_", " ", term))
+
+hallmark_enrichr <- function(gene_set){
+  
+  hallmark_res <- 
+    map_df(gene_set, ~{
+      as.data.frame(enricher(.x, TERM2GENE=hallmarks))
+    }, .id = "set"
+    )
+  hallmark_res %>%
+    select(set, ID, qvalue) %>%
+    pivot_wider(names_from = set, values_from = qvalue)
+
+  return(hallmark_res)
+}
+
+# use t stat or log fc
+hallmark_gsea <- function(gene_set){
+
+  hallmark_gsea_res <- map_df(gene_set, ~{
+    as.data.frame(GSEA(.x, TERM2GENE = hallmarks, minGSSize = 5, pvalueCutoff = 1, eps = 0))
+  }, .id = "set")
+  
+  return(hallmark_gsea_res)
+}
+
+#als_gsea <- hallmark_gsea(als_genes$lfc)
+
+
+# plot hallmarks
+hallmark_gsea_plot <- function(df, plot_all = FALSE){
+  df$ID <- gsub("^\\s+", "", df$ID)
+  
+  if( plot_all == TRUE){
+    sig_level <- 1
+  }else{
+    sig_level <- 0.05
+  }
+  
+  hallmark_levels <- 
+    df %>%
+    filter(p.adjust < sig_level) %>%
+    select(set, ID, NES) %>%
+    pivot_wider(names_from = set, values_from = NES) %>%
+    rowwise() %>%
+    mutate(mean_nes = mean( c(CSC, LSC, TSC), na.rm = TRUE)) %>%
+    arrange( mean_nes) %>%
+    mutate(ID = factor(ID, levels = ID)) 
+    
+  if( plot_all == FALSE){
+    hallmark_levels <- hallmark_levels %>% tidyr::drop_na()
+  }
+
+  to_plot <-
+    df %>%
+    mutate(padj = p.adjust) %>%
+    mutate(padj_label = case_when(
+    padj < 0.0001 ~ "***",
+    padj < 0.001 ~ "**",
+    padj < 0.05 ~ "*",
+    TRUE ~ "."
+    )) 
+  
+  
+    to_plot %>%
+      filter(ID %in% hallmark_levels$ID) %>%
+      mutate(ID = factor(ID, levels = hallmark_levels$ID)) %>%
+      mutate(set = factor(set, levels = c("CSC", "TSC", "LSC"))) %>%
+    ggplot(aes(x = set, y = ID, label = padj_label, fill = NES)) + 
+    geom_tile() + 
+    geom_text() +
+    scale_fill_distiller(na.value = "lightgray", palette = "RdBu", limits = c(-4,4) ) + 
+    #geom_text(aes(label = signif(value, digits = 2) ) ) +
+    scale_x_discrete(expand = c(0,0), position = "top") +
+    scale_y_discrete(expand = c(0,0)) +
+    theme_jh() +
+    labs(subtitle = "MSigDB Hallmark gene set enrichment analysis", x = "", y = "", fill = "NES")
+
+}
+
+
+```
+
+
+# ALS Case vs Control
+
+```{r}
+als_res <- load_results(here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res.RData"))
+als_genes <- make_gene_sets(als_res)
+
+```
+
+### overlapping genes
+
+```{r}
+map_df( als_res, ~{ 
+  sig_all <- filter(.x, adj_p_val < 0.05 ) %>% nrow()
+  sig_strong <- filter(.x, adj_p_val < 0.05 & abs(log_fc) > 1) %>% nrow() 
+  tibble( sig_all, sig_strong)
+  }, .id = "tissue")
+
+strong_genes <- map( als_res, ~{ 
+  sig_strong <- filter(.x, adj_p_val < 0.05 & abs(log_fc) > 2) %>% pull(genename)
+  } )
+
+UpSetR::upset(UpSetR::fromList(strong_genes))
+
+intersect(intersect(strong_genes$CSC, strong_genes$TSC), strong_genes$LSC)
+```
+LYZ, CHIT1 and GPNMB are strongly upregulated in all 3 tissues (lfc > 2)
+
+### Volcano and MA plots
+
+```{r fig.width = 7, fig.height = 2.2}
+
+volcano_multiplot <- 
+  volcano_plot(als_res$CSC, "Cervical Spinal Cord", 
+               subtitle = "35 Controls vs 139 ALS",
+               annotate_by = c("LYZ", "GPNMB", "CHIT1", "C3", "MOBP")) +
+  volcano_plot(als_res$TSC, "Thoracic Spinal Cord",
+               subtitle = "10 Controls vs 42 ALS",
+               annotate_by = c("LYZ", "GPNMB", "CHIT1", "C3", "MOBP")) +
+  volcano_plot(als_res$LSC, "Lumbar Spinal Cord",
+               subtitle = "32 Controls vs 122 ALS",
+               annotate_by = c("LYZ", "GPNMB", "CHIT1", "C3", "MOBP")) +
+  plot_layout(nrow = 1)
+volcano_multiplot
+ggsave(plot = volcano_multiplot, filename = here::here("ALS_SC/plots/als_volcano_multiplot.pdf"), width = 7.5, height = 2.2)
+```
+
+
+```{r fig.width = 8 , fig.height = 3}
+ma_multiplot <- 
+  ma_plot(als_res$CSC, title = "Cervical Spinal Cord") + 
+ma_plot(als_res$LSC, title = "Lumbar Spinal Cord") +
+  ma_plot(als_res$TSC, title = "Thoracic Spinal Cord") +
+  plot_layout(ncol = 3)
+ggsave(plot =ma_multiplot, filename = here::here("ALS_SC/plots/als_ma_multiplot.pdf"), width = 8, height = 3)
+
+
+```
+
+## Pathways 
+
+```{r fig.height = 4, fig.width = 5}
+als_hallmark <- hallmark_gsea(als_genes$lfc)
+
+hallmark_gsea_plot(als_hallmark)
+
+#als_hallmark <- hallmark_gsea(als_genes$lfc)
+
+h_plot <- hallmark_gsea_plot(als_hallmark)
+
+h_plot 
+#hallmark_gsea_plot(als_hallmark, plot_all = TRUE)
+
+ggsave(plot = h_plot, 
+       filename = here::here("ALS_SC/plots/als_hallmark_selected.pdf"), width = 5, height = 4)
+```
+
+Supplementary Figure - all hallmark pathway results
+
+```{r fig.height = 12, fig.width =5 }
+h_plot_all <- hallmark_gsea_plot(als_hallmark, plot_all = TRUE)
+
+h_plot_all
+
+ggsave(plot = h_plot_all, 
+       filename = here::here("ALS_SC/plots/als_hallmark_all.pdf"), width = 5, height = 9)
+```
+
+
+
+## Load Marker Genes
+
+```{r fig.width = 7, fig.height = 4}
+# Neuroexpresso
+load(here::here("data/misc/neuroexpresso_spinal_cord_human.RData"))
+
+nxp_gsea  <- named_list_to_df(nxp)
+
+## Kelley
+load(here::here("data/markers/kelley_markers.RData"))
+
+kelley_gsea <- named_list_to_df(kelley)
+
+# Panglaodb
+load(here::here("data/markers/PanglaoDB_markers.RData"))
+
+panglao <- named_list_to_df(pg_list) %>%
+  filter(term_id %in% c("Endothelial cells", "Ependymal cells", "Microglia", "Neurons", "Motor neurons", "Oligodendrocytes", "Pericytes", "Astrocytes", "Cholinergic neurons"))
+
+## activation sets
+load(here::here("data/markers/activation_markers.RData"))
+
+act_sets <- c( "Disease-associated microglia", "Disease-associated astrocytes", "Reactive astrocytes - MCAO", "Reactive astrocytes - LPS", "Plaque-induced genes") 
+
+
+activation_gsea <- named_list_to_df(activation_sets) %>%
+  filter( term_id %in% act_sets)
+
+
+```
+
+
+```{r}
+nxp_gsea_res <- map_df(als_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = nxp_gsea,pvalueCutoff = 1,eps = 0))
+}, .id = "set")
+  
+
+gsea_plot(nxp_gsea_res) 
+
+gsea_box_plots(als_res, markers = nxp )
+
+
+```
+
+Using Neuroexpresso markers for Cholinergic Spinal Cord - all 3 tissues show modest downregulation using GSEA.  This is not observed using the Kelley markers - smaller set but not specific to motor neurons.
+
+
+## Kelley Markers
+
+```{r  fig.width = 4, fig.height = 3}
+
+
+kelley_gsea_res <- map_df(als_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = kelley_gsea,pvalueCutoff = 1))
+}, .id = "set")
+  
+kelley_gsea_res$ID <- factor(kelley_gsea_res$ID, levels = rev(c("Astrocytes", "Microglia", "Neurons", "Oligos")))
+kelley_gsea_plot <- gsea_plot(kelley_gsea_res) 
+
+kelley_gsea_plot 
+
+```
+
+Supplementary plot
+
+```{r}
+gsea_box_plots(als_res, kelley)
+
+als_res$CSC %>%
+  filter(genename %in% kelley$Oligos)
+
+```
+
+Neuron upregulation enrichment in CSC is driven by GABA genes.
+
+
+
+## Panglaodb
+
+```{r}
+
+panglao_gsea_res <- map_df(als_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = panglao,pvalueCutoff = 1))
+}, .id = "set")
+  
+
+gsea_plot(panglao_gsea_res) 
+
+gsea_box_plots(als_res, panglao ) 
+
+```
+
+
+# Activation marker sets
+
+compiled from multiple papers
+
+```{r}
+
+activation_gsea_res <- map_df(als_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = activation_gsea,pvalueCutoff = 1))
+}, .id = "set")
+
+activation_gsea_res$ID <- factor(activation_gsea_res$ID, levels = rev(act_sets))
+
+activation_gsea_plot <- gsea_plot(activation_gsea_res) 
+
+gsea_box_plots(als_res, markers = activation_sets[act_sets])
+
+```
+
+Combine tissue and activation together
+
+```{r fig.width = 4, fig.height = 4}
+als_multiplot <- kelley_gsea_plot + 
+  activation_gsea_plot + 
+  plot_layout(ncol =1 , heights = c(4,5), guides = "collect")
+
+
+ggsave(plot = als_multiplot, filename = here::here("ALS_SC/plots/als_cell_activation.pdf"), width = 4, height = 4)
+```
+
+
+
+# Disease Duration -------------
+
+
+```{r fig.height = 2.5, fig.width = 8}
+dur_res <- load_results(here::here("data/differential_expression/ALS/Model_8_limma_res.RData"))
+dur_genes <- make_gene_sets(dur_res)
+dur_genes$lfc$TSC <- NULL
+
+
+duration_volcano <- 
+  volcano_plot(dur_res$CSC, title = "Cervical Spinal Cord", subtitle = "139 ALS",  
+               annotate_by = c("CHIT1", "C3", "LYZ", "GPNMB", "MOBP", "GFAP"), type = "duration") +
+  volcano_plot(dur_res$TSC, title = "Thoracic Spinal Cord", subtitle = "42 ALS",  
+               annotate_by = c("CHIT1", "C3", "LYZ", "GPNMB", "MOBP", "GFAP"),type = "duration") + 
+  volcano_plot(dur_res$LSC, title = "Lumbar Spinal Cord", subtitle = "122 ALS", 
+               annotate_by = c("CHIT1", "C3", "LYZ", "GPNMB", "MOBP", "GFAP"),type = "duration") 
+
+duration_volcano 
+
+ggsave(plot = duration_volcano, filename = here::here("ALS_SC/plots/duration_volcano.pdf"), width = 7.5, height = 2.2)
+
+
+```
+
+
+Cell types and activation
+
+```{r fig.width = 4, fig.height= 4}
+dur_activation_gsea_res <- 
+  map_df(dur_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = activation_gsea,pvalueCutoff = 1, minGSSize = 5, eps = 0))
+}, .id = "set")
+  
+gsea_plot(dur_activation_gsea_res) 
+
+gsea_box_plots(dur_res, markers = activation_sets)
+
+dur_kelley_gsea_res <- map_df(dur_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = kelley_gsea,pvalueCutoff = 1, minGSSize = 5, eps = 0))
+}, .id = "set")
+  
+
+gsea_box_plots(dur_res, kelley)
+
+dur_activation_plot <- 
+  gsea_plot(dur_activation_gsea_res)  + gsea_plot(dur_kelley_gsea_res) + 
+  plot_layout(ncol = 1, guides = "collect", heights = c(5,4))
+
+dur_activation_plot
+
+ggsave(plot = dur_activation_plot, filename = here::here("ALS_SC/plots/dur_cell_activation.pdf"), width = 4, height = 4)
+
+
+dur_panglao_gsea_res <- map_df(dur_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = panglao,pvalueCutoff = 1, minGSSize = 5, eps = 0))
+}, .id = "set")
+  
+gsea_plot(dur_panglao_gsea_res) 
+
+gsea_box_plots(dur_res, panglao)
+
+dur_nxp_gsea_res <- map_df(dur_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = nxp_gsea,pvalueCutoff = 1, minGSSize = 5, eps = 0))
+}, .id = "set")
+  
+gsea_plot(dur_nxp_gsea_res) 
+
+```
+
+
+## Duration Deconvolution
+
+```{r fig.width = 8, fig.height = 6}
+deconv_res <- read_tsv(here::here("data/deconvolution/Mathys_MuSiC_residual_results.tsv"))
+
+conversion_table <- data.frame(short = c("Ast","End", "Mic", "Ex", "Oli", "Per" ),
+                               long = c("Astrocytes", "Endothelial", "Microglia", "Neurons", "Oligos", "Pericytes")
+  )
+
+mathys_music_df <- deconv_res %>%
+  inner_join(conversion_table, by = c("cell" = "short") ) %>%
+  select(-cell) %>%
+  rename(cell = long) %>%
+  select(sample, disease, duration, cell, tissue, deconv, resid, p_nom, p_resid)
+
+
+duration_deconv_cor_df <- 
+  mathys_music_df %>%
+  filter( tissue == "Cervical_Spinal_Cord", disease == "ALS") %>%
+  mutate(duration = as.numeric(duration)) %>%
+  split(.$cell) %>%
+  map_df( ~{ cor.test(.x$deconv, .x$duration, method = "spearman" ) %>%
+      broom::tidy() }, .id = "cell") %>%
+  mutate(padj = p.adjust(p.value, method = "bonferroni")) %>%
+  mutate(cor = paste0("R = ",signif(estimate, digits =  2)) ) %>%
+  mutate(padj_label = case_when(
+    padj < 0.0001 ~ "***",
+    padj < 0.001 ~ "**",
+    padj < 0.05 ~ "*",
+    TRUE ~ "."
+    )) 
+
+duration_deconv_plot <- 
+mathys_music_df %>%
+  filter( tissue == "Cervical_Spinal_Cord", disease == "ALS") %>%
+  mutate(duration = as.numeric(duration)) %>%
+  filter(!is.na(duration)) %>%
+  left_join(duration_deconv_cor_df, by = "cell" ) %>%
+  mutate(cell = paste0(cell, "\n", padj_label)) %>%
+ ggplot(aes(x = duration, y = deconv)) +
+    rasterise(
+      geom_point(size = 0.3, colour = "blue" ),
+      dpi = 300
+      )+
+  geom_smooth(method = "lm", colour = "black") +
+    #geom_boxplot(fill = NA,notch = FALSE, na.rm = TRUE, outlier.color = NA) +
+    facet_wrap( ~ cell, scales = "free_y",  nrow = 2 ) +
+    #scale_colour_manual(values = c("#4F8FC4", "#B61927")) +
+    labs( x = "", y = "" ) +
+    guides(fill = FALSE, colour = FALSE) +
+    theme_jh() +
+    theme(
+      plot.title = element_blank(),
+      strip.background = element_blank(),
+      #strip.switch.pad.grid = unit(0,units ="pt"),
+      #panel.spacing.x = unit(0,units = "pt"), 
+      strip.placement = "outside",
+      panel.border = element_blank(),
+      strip.text.x = element_text( face = 'plain', hjust = 0.5, vjust = 1, margin = margin(t =5, b = 0, unit = "pt")),
+      strip.text.y.left = element_text(angle = 0)#,
+      #plot.margin = margin()
+    ) +
+    labs(y = "") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1) ) +
+  ggpubr::stat_cor(aes(label = ..r.label..), method = "spearman", label.y.npc = 1, label.x.npc = 0.33, size = 3)
+
+  duration_deconv_plot
+
+ggsave( plot = duration_deconv_plot,filename = here::here("ALS_SC/plots/dur_deconvolution.pdf"), width = 4.5, height = 3.5 )
+```
+
+

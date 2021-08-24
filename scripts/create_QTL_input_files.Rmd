@@ -1,0 +1,536 @@
+---
+title: "Create QTL Input Files"
+author: "Jack Humphrey"
+date: "`r Sys.Date()`"
+output: 
+  rmarkdown::html_document:
+    theme: spacelab
+    highlight: zenburn
+    code_folding: hide
+    toc: true
+    toc_float: true
+    smooth_scroll: true
+    number_sections: false
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+options(knitr.kable.NA = '-')# sets NA values in kable tables to "-"
+options(kableExtra.kable.booktabs = TRUE)
+options(kableExtra.kable_styling.position = "center")
+options(knitr.table.format = "markdown")
+
+knitr::opts_chunk$set(out.width='90%', dpi=200)
+library(readxl)
+library(ggbeeswarm)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(purrr)
+library(kableExtra)
+library(tidyr)
+library(readr)
+library(janitor) # for adorn_total and clean_names
+library(patchwork)
+library(ggfortify)
+
+```
+
+```{r}
+load(here::here("data/QTLs/Nov_2020/QTL_input_metadata.RData"))
+
+dir.create(here::here("data/QTLs/Nov_2020/input/"))
+
+## Now only keep spinal cord
+tissues_to_keep <- c("Cervical_Spinal_Cord", "Thoracic_Spinal_Cord", "Lumbar_Spinal_Cord")
+
+```
+
+
+# Prepare Files for QTL mapping
+
+Set up just for spinal cord at the moment.
+
+## Split participant table by tissue for the tissues with 50+ samples
+
+```{r }
+# only use tissues with 50+ samples
+tissue_numbers <- 
+  clean_participant_table %>%
+  group_by(tissue) %>% summarise( n =n() ) %>% arrange(desc(n))
+
+tissue_numbers
+
+tissue_numbers %>% knitr::kable(format = "html") %>% kableExtra::kable_styling()
+
+# # might as well keep Hippocampus samples in at n = 49
+# tissues_to_keep <- 
+#   tissue_numbers %>%
+#   filter(n > 40) %>%
+#   pull(tissue)
+
+## Now only keep spinal cord
+tissues_to_keep <- c("Cervical_Spinal_Cord", "Thoracic_Spinal_Cord", "Lumbar_Spinal_Cord")
+
+# split by tissue
+participant_table_by_tissue <- 
+  clean_participant_table %>% 
+  filter(tissue %in% tissues_to_keep) %>% 
+  split(.$tissue) 
+
+```
+
+
+```{r}
+# be wary of duplicates
+
+walk2(.x = participant_table_by_tissue, .y = names(participant_table_by_tissue), ~{
+    .x$tissue <- NULL
+    tissue <- gsub("_", "", .y) # remove underscores - snakemake will get confused otherwise
+    outFile <- here::here(paste0("data/QTLs/Nov_2020/input/", tissue, "_sample_key.txt"))
+    print(outFile)
+    write_tsv(.x, outFile)
+  })
+
+
+tissue_n <-
+  tissue_numbers %>%
+  filter(n >= 40) %>%
+  as.data.frame() %>%
+  tibble::column_to_rownames(var = "tissue")
+
+tissue_n
+```
+
+## DNA covariates
+
+Along with sex, DNA seq platform, DNA library prep and RNA librar prep should all be added to QTL mapping model.
+
+Two many factors for DNA tissue source to be used. 
+
+Factor covariates must be dummy encoded
+
+```{r}
+#table(clean_vcf_metadata$prep, clean_vcf_metadata$platform)
+
+clean_vcf_metadata$rna_prep <- rna$prep[ match(clean_vcf_metadata$external_subject_id, rna$external_subject_id)]
+clean_vcf_metadata$rna_platform <- rna$platform[ match(clean_vcf_metadata$external_subject_id, rna$external_subject_id)]
+
+# DNA sequencing platform correaltes very well with the RNA sequencing platform used
+# table(clean_vcf_metadata$prep, clean_vcf_metadata$rna_prep)
+# table(clean_vcf_metadata$platform, clean_vcf_metadata$rna_platform)
+
+# table(clean_vcf_metadata$sample_tissue_source)
+
+#View(dna_sex_check)
+# take first 4 and transpose data frame
+
+wgs_covariates <-
+  select(clean_vcf_metadata, vcf_id, dna_prep = prep, dna_platform = platform, sex = sex_call, rna_prep) %>%
+  tibble::column_to_rownames(var = "vcf_id")
+
+# use model.matrix to encode as dummy variables
+wgs_covariates <- 
+  as.data.frame(model.matrix( ~ dna_prep + dna_platform + rna_prep + sex, data = wgs_covariates) ) %>%
+  tibble::rownames_to_column(var = "vcf_id") %>%
+  select(-"(Intercept)") %>%
+  tidyr::gather(key = "key", value = "value", -vcf_id) %>%
+  tidyr::spread(key = vcf_id, value = value) %>%
+  select(ID = key, everything())
+
+write_tsv(wgs_covariates, path = here::here("data/QTLs/Nov_2020/input/all_cohort_wgs_covariates.txt"))
+
+# save genetic PCs for each tissue separately
+walk2(.x = participant_table_by_tissue, .y = names(participant_table_by_tissue), ~{
+    tissue <- gsub("_", "", .y) # remove underscores - snakemake will get confused otherwise
+    samples <- .x$participant_id
+    per_tissue_wgs_cov <- wgs_covariates[, c("ID", as.character(samples) )]
+    outFile <- here::here(paste0("data/QTLs/Nov_2020/input/", tissue, "_wgs_covariates.txt"))
+    print(outFile)
+    write_tsv(per_tissue_wgs_cov, outFile)
+})
+
+
+
+```
+
+Almost all DNA was extracted from brain rather than blood, with many different regions used. Not worth adding this to model as too many categories.
+
+
+
+```{r}
+all_samples <- participant_table_by_tissue %>% map("sample_id") %>% unlist() 
+
+qtl_sample_table <- dplyr::filter(rna, external_sample_id %in% all_samples)
+
+write_tsv(qtl_sample_table, file = "../../ALS_SC/tables/all_qtl_samples_used.tsv")
+```
+
+
+
+
+## Genetic PCs
+
+write out first 5 genetic PCs for each tissue
+
+```{r}
+# take first 5 and transpose data frame
+als_pca_transpose <- 
+  select(als_pca, vcf_id, PC1, PC2, PC3,PC4, PC5) %>%
+  filter(vcf_id %in% clean_participant_table$participant_id) %>%
+  tidyr::gather(key = "PC", value = "number", -vcf_id) %>%
+  tidyr::spread(key = vcf_id, value = number) %>%
+  select(ID = PC, everything())
+
+# save genetic PCs for each tissue separately
+walk2(.x = participant_table_by_tissue, .y = names(participant_table_by_tissue), ~{
+    tissue <- gsub("_", "", .y) # remove underscores - snakemake will get confused otherwise
+    samples <- .x$participant_id
+    per_tissue_geno_pcs <- als_pca_transpose[, c("ID", as.character(samples) )]
+    outFile <- here::here(paste0("data/QTLs/Nov_2020/input/", tissue, "_genotype_PCs.txt"))
+    print(outFile)
+    write_tsv(per_tissue_geno_pcs, outFile)
+  })
+
+
+
+```
+
+## Junction file lists
+
+for each tissue provide a list of junction files for sQTLs
+
+also provide a total list of sample IDs for leafcutter-pipeline to extract junctions.
+
+```{r}
+
+juncFolder <- "input_files/junctions/"
+# save lists of junction files for each tissue separately
+walk2(.x = participant_table_by_tissue, .y = names(participant_table_by_tissue), ~{
+    tissue <- gsub("_", "", .y) # remove underscores - snakemake will get confused otherwise
+    samples <- .x$sample_id
+    junctions <- paste0(juncFolder, samples, ".junc")
+    #print(head(junctions))
+    outFile <- here::here(paste0("data/QTLs/Nov_2020/input/", tissue, "_junction_paths.txt"))
+    print(outFile)
+    writeLines(text = junctions, con =  outFile)
+  })
+
+all_samples <- data.frame(sample = clean_participant_table$sample_id )
+
+write_tsv(all_samples, here::here(paste0("data/QTLs/Nov_2020/input/all_samples_leafcutter.tsv")) )
+```
+
+
+
+For each tissue I should write out:
+
+a sample key matching RNA-seq samples to the VCF id for each individual
+a genetic covariate file containing WGS covariates (platform, prep, sex)
+a genetic PC file
+a list of junction files for sQTLs
+
+a config.yaml file set with the tissue name and relative paths to above files.
+
+Set config parameters here
+
+PEER factors - tissues with >150 samples have 30 PEER factors, <150 get 15.
+
+
+```{r}
+
+inFolder <- "input_files/SpinalCord/"
+
+# check these two!
+#VCF <- paste0(inFolder, "chrAll_QCFinished_MAF0.01.vcf.gz")
+VCF <- "/sc/arion/projects/als-omics/WGS_QC/NYGC_Freeze02_European_Feb2020/WGS_QC_Pipeline/NYGC_Freeze02_European_Feb2020/output/chrAll_QCFinished_MAF0.01.anno.vcf.gz"
+countMatrixRData <- paste0("input_files/gene_matrix.RData")
+
+walk2(.x = participant_table_by_tissue, .y = names(participant_table_by_tissue), ~{
+  
+  # work out PEER factor number
+  #n_PEER = ifelse( tissue_n[.y,] >= 150, yes = c(0,5,15,20,25,30, no = c(0,5,10,15,30) )
+  n_PEER <- c(0,5,10,15,20,25,30)
+  
+  #print(.y)
+  tissue <- gsub("_", "", .y)
+
+  outFile <- outFile <- here::here(paste0("data/QTLs/Nov_2020/input/", tissue, "_config.yaml"))
+  config <- list(
+    dataCode = tissue,
+    sampleKey = paste0(inFolder, tissue, "_sample_key.txt"),
+    genotypePCs = paste0(inFolder, tissue, "_genotype_PCs.txt"),
+    covariateFile = paste0(inFolder, tissue, "_wgs_covariates.txt"),
+    junctionFileList = paste0(inFolder, tissue, "_junction_paths.txt"),
+    PEER_values = as.character(n_PEER),
+    VCF = VCF,
+    countMatrixRData = countMatrixRData
+  )
+  print(outFile)
+  yaml::write_yaml(config, file = outFile )
+})
+
+
+```
+
+# Interactions
+
+## Tissue composition estimation
+
+Focus on Spinal Cord for now.
+
+For each eQTL tissue, create 4 interaction files containing the residualised deconvolution estimates of each cell type (Neurons, Astrocytes, Oligodendrocytes and Microglia).
+
+```{r}
+deconv_res <- read_tsv(here::here("data/deconvolution/Mathys_MuSiC_residual_results.tsv"))
+deconv_res$cell_type <- deconv_res$cell
+deconv_res$cell <- NULL
+
+celltype_interaction_tissues <- c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord", "Thoracic_Spinal_Cord")
+
+#cell_types <- c("astrocytes", "microglia", "neurons","oligodendrocytes")
+
+cell_types <- c("Ast", "Ex", "Mic", "Oli")
+
+
+# split by tissue
+celltype_participant_table_by_tissue <- 
+  clean_participant_table %>% 
+  filter(tissue %in% celltype_interaction_tissues, sample_id %in% deconv_res$sample ) %>% 
+  split( .$tissue) 
+
+for( cell in cell_types){
+  print(cell)
+  inFolder <- here::here(paste0("data/QTLs/Nov_2020/celltype_resid/", cell, "/") )
+  dir.create(inFolder, recursive = TRUE)
+  
+  # folder on HPC
+  dataFolder <- paste0("input_files/celltype_resid/", cell, "/")
+  juncFolder <- paste0("input_files/junctions/")  
+  interaction_name = paste0("celltype_", cell, "_resid")
+
+  ## write out config files for each tissue
+  walk2(.x = celltype_participant_table_by_tissue, .y = names(celltype_participant_table_by_tissue), ~{
+    # sample key
+    .x$tissue <- NULL
+
+    tissue <- gsub("_", "", .y) # remove underscores - snakemake will get confused otherwise
+    outFile <- paste0( inFolder, tissue, "_sample_key.txt")
+    sample_key <- .x[,c("sample_id", "participant_id")]
+    print(outFile)
+    write_tsv(sample_key, outFile)
+    
+    # genotype PCs
+    participants <- .x$participant_id
+    per_tissue_geno_pcs <- als_pca_transpose[, c("ID", as.character(participants) )]
+    outFile <- paste0(inFolder, tissue, "_genotype_PCs.txt")
+    print(outFile)
+    write_tsv(per_tissue_geno_pcs, outFile)
+    
+    ## Junctions
+    samples <- .x$sample_id
+    junctions <- paste0(juncFolder, samples, ".junc")
+    #print(head(junctions))
+    outFile <- paste0(inFolder, tissue, "_junction_paths.txt")
+    print(outFile)
+    writeLines(text = junctions, con =  outFile)
+    
+    ## WGS covariates
+    per_tissue_wgs_cov <- wgs_covariates[, c("ID", as.character(participants) )]
+    outFile <- paste0(inFolder, tissue, "_wgs_covariates.txt")
+    print(outFile)
+    write_tsv(per_tissue_wgs_cov, outFile)
+    
+    ## Interaction term - celltype
+    # should not be transposed
+    # was using residual estimate
+    # now using unadjusted estimate - lognormal transformed
+    deconv_loc <- filter(deconv_res, cell_type == cell, sample %in% .x$sample_id)
+    celltype_interaction <- .x
+    celltype_interaction[[cell]] <- deconv_loc$deconv[ match(.x$sample_id, deconv_loc$sample)]
+    celltype_interaction <- celltype_interaction[, c("participant_id", cell )]
+    
+    
+    outFile <- paste0(inFolder, tissue, "_celltype_interaction.txt")
+    print(outFile)
+    write_tsv(celltype_interaction, path = outFile, col_names = FALSE)
+    
+    ## Config.yaml
+    n_PEER = c(0,5,10,15,20,25,30)
+    outFile <- paste0(inFolder, tissue, "_config.yaml")
+    config <- list(
+      dataCode = paste0(tissue, "_celltype_", cell),
+      sampleKey = paste0(dataFolder, tissue, "_sample_key.txt"),
+      genotypePCs = paste0(dataFolder, tissue, "_genotype_PCs.txt"),
+      covariateFile = paste0(dataFolder, tissue, "_wgs_covariates.txt"),
+      junctionFileList = paste0(dataFolder, tissue, "_junction_paths.txt"),
+      interaction_file = paste0(dataFolder, tissue, "_celltype_interaction.txt"),
+      interaction_name = interaction_name,
+      interaction = TRUE,
+      PEER_values = as.character(n_PEER),
+      VCF = VCF,
+      countMatrixRData = countMatrixRData
+    )
+    print(outFile)
+    yaml::write_yaml(config, file = outFile )
+  })
+}
+  
+
+
+```
+
+
+
+## Disease Status
+
+Map QTLs to only ALS samples in Lumbar and Cervical Spinal Cord
+How does this compare to QTLs in the full cohort?
+
+```{r}
+clean_participant_table$disease <- rna$disease[ match(clean_participant_table$sample_id, rna$external_sample_id)]
+clean_participant_table$platform <- rna$platform[ match(clean_participant_table$sample_id, rna$external_sample_id)]
+
+
+disease_numbers <- 
+  clean_participant_table %>%
+  filter(grepl("ALS", disease)) %>%
+  group_by(tissue) %>% summarise( n =n())
+
+
+disease_numbers %>% knitr::kable(format = "html") %>% kableExtra::kable_styling()
+
+
+
+#disease_numbers_by_platform
+
+# only 4 tissues have at least 30 controls and 100 cases
+disease_tissues <- c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord", "Thoracic_Spinal_Cord")
+
+
+
+
+# split by tissue
+disease_participant_table_by_tissue <- 
+  clean_participant_table %>% 
+  filter(tissue %in% disease_tissues, grepl("ALS", disease) ) %>% 
+  split( .$tissue) 
+
+dir.create(here::here("data/QTLs/Nov_2020/ALS_only/"))
+
+
+#interaction_name = "disease"
+
+## sample keys
+walk2(.x = disease_participant_table_by_tissue, .y = names(disease_participant_table_by_tissue), ~{
+  # sample key
+  .x$tissue <- NULL
+  inFolder <- here::here("data/QTLs/Nov_2020/ALS_only/")
+  juncFolder <- "input_files/junctions/"
+  dataFolder <- "input_files/ALS_only/"
+
+  tissue <- gsub("_", "", .y) # remove underscores - snakemake will get confused otherwise
+  outFile <- paste0( inFolder, tissue, "_sample_key.txt")
+  sample_key <- .x[,c("sample_id", "participant_id")]
+  print(outFile)
+  write_tsv(sample_key, outFile)
+  
+  # genotype PCs
+  participants <- .x$participant_id
+  per_tissue_geno_pcs <- als_pca_transpose[, c("ID", as.character(participants) )]
+  outFile <- paste0(inFolder, tissue, "_genotype_PCs.txt")
+  print(outFile)
+  write_tsv(per_tissue_geno_pcs, outFile)
+  
+  ## Junctions
+  samples <- .x$sample_id
+  junctions <- paste0(juncFolder, samples, ".junc")
+  #print(head(junctions))
+  outFile <- paste0(inFolder, tissue, "_junction_paths.txt")
+  print(outFile)
+  writeLines(text = junctions, con =  outFile)
+  
+  ## WGS covariates
+  per_tissue_wgs_cov <- wgs_covariates[, c("ID", as.character(participants) )]
+  outFile <- paste0(inFolder, tissue, "_wgs_covariates.txt")
+  print(outFile)
+  write_tsv(per_tissue_wgs_cov, outFile)
+  
+  ## Config.yaml
+  n_PEER = c(0,10,15,20)
+  outFile <- paste0(inFolder, tissue, "_config.yaml")
+  config <- list(
+    dataCode = paste0(tissue, "_ALS_only"),
+    sampleKey = paste0(dataFolder, tissue, "_sample_key.txt"),
+    genotypePCs = paste0(dataFolder, tissue, "_genotype_PCs.txt"),
+    covariateFile = paste0(dataFolder, tissue, "_wgs_covariates.txt"),
+    junctionFileList = paste0(dataFolder, tissue, "_junction_paths.txt"),
+    interaction = FALSE,
+    PEER_values = as.character(n_PEER),
+    VCF = VCF,
+    countMatrixRData = countMatrixRData
+  )
+  print(outFile)
+  yaml::write_yaml(config, file = outFile )
+})
+
+```
+
+
+<!-- ## Shared Donor Interaction QTLs using Suez -->
+
+<!-- Take all 3 spinal cord regions and produce the following: -->
+<!-- a sample key with samples and participants for all 3 regions -->
+<!-- a metadata file including all cell type proportions -->
+
+<!-- ```{r} -->
+<!-- inFolder <- here::here("data/QTLs/SuezSC/") -->
+<!-- dir.create(inFolder) -->
+
+<!-- deconv_res <- read_tsv(here::here("data/deconvolution/Mathys_MuSiC_residual_results.tsv")) -->
+<!-- deconv_res$cell_type <- deconv_res$cell -->
+<!-- deconv_res$cell <- NULL -->
+
+
+<!-- sc_sample_key <- clean_participant_table %>% -->
+<!--   filter(tissue %in% tissues_to_keep, sample_id %in% deconv_res$sample) %>% -->
+<!--   select(-tissue) -->
+
+<!-- sc_sample_key$disease <- support$disease[ match(sc_sample_key$sample_id, support$sample)] -->
+
+
+
+<!-- celltype_interaction_tissues <- c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord", "Thoracic_Spinal_Cord") -->
+
+<!-- #cell_types <- c("astrocytes", "microglia", "neurons","oligodendrocytes") -->
+
+<!-- cell_types <- c("Ast","Mic", "Oli") -->
+
+<!-- deconv_df <-  -->
+<!--   deconv_res %>% -->
+<!--   filter(sample %in% sc_sample_key$sample_id) %>% -->
+<!--   filter(cell_type %in% cell_types) %>% -->
+<!--   select(sample, cell_type, deconv) %>% -->
+<!--   pivot_wider(names_from = "cell_type", values_from = "deconv") %>% -->
+<!--   tibble::column_to_rownames(var = "sample") %>% -->
+<!--   log() %>% -->
+<!--   scale() %>% -->
+<!--   as.data.frame() %>% -->
+<!--   tibble::rownames_to_column(var = "sample_id") -->
+
+<!-- sc_meta <- left_join(sc_sample_key, deconv_df ) -->
+
+<!-- write_tsv(sc_meta, paste0(inFolder, "spinal_cord_meta.tsv")) -->
+<!-- write_tsv(sc_sample_key, paste0(inFolder, "spinal_cord_sample_key.tsv")) -->
+
+<!-- load(here::here("data/feb_2020/gene_matrix.RData") ) -->
+
+<!-- genes_tpm <- genes_tpm[, sc_sample_key$sample_id] -->
+
+<!-- saveRDS(genes_tpm, file = paste0(inFolder, "sc_gene_tpm.rds")) -->
+
+
+<!-- ``` -->
+
+

@@ -1,0 +1,1122 @@
+---
+title: "ALS Differential Expression"
+author: |
+  | Jack Humphrey
+  | Raj Lab
+  | Department of Neuroscience
+  | Icahn School of Medicine at Mount Sinai
+  | NYC, New York
+date: "`r Sys.Date()`"
+output: 
+ rmarkdown::html_document:
+   theme: spacelab
+   highlight: haddock
+   code_folding: hide
+   toc: true
+   toc_float: true
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true  
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.height = 8, fig.width = 10)
+library(tidyverse)
+library(ggfortify)
+library(patchwork)
+library(pheatmap)
+#library('variancePartition')
+library(limma)
+library(edgeR)
+library(gt)
+library(corrplot)
+
+# tissues <- c("Frontal_Cortex", "Lateral_Motor_Cortex", "Medial_Motor_Cortex", "Temporal_Cortex", "Cerebellum", "Lumbar_Spinal_Cord", "Cervical_Spinal_Cord", "Thoracic_Spinal_Cord", "Unspecified_Motor_Cortex")
+tissues <- c("Lumbar_Spinal_Cord", "Cervical_Spinal_Cord", "Thoracic_Spinal_Cord")
+
+gene_meta <- read_tsv(here::here("data/misc/gencode.v30.tx2gene.tsv.gz") )%>%
+  janitor::clean_names() %>%
+  select(genename, geneid) %>%
+  distinct() %>%
+  mutate( geneid = str_split_fixed(geneid, "\\.", 2)[,1] )
+
+
+theme_jh <- function () { 
+    theme_bw(base_size=10, base_family="Helvetica") %+replace% 
+        theme(
+          panel.grid = element_blank(),
+          strip.background = element_blank(),
+          #panel.border = element_blank(),
+          axis.line = element_line(),
+          #text = element_text(color = "black"), 
+          strip.text = element_text(color = "black"),
+          axis.text = element_text(colour = "black"),
+            panel.background  = element_blank(),
+            plot.background = element_rect(fill="white", colour=NA), 
+            legend.background = element_rect(fill="transparent", colour=NA),
+            legend.key = element_rect(fill="transparent", colour=NA), 
+            axis.line.y = element_line(), strip.text.x = element_text(face = "bold", margin = margin(t = 2,r = 0,b = 2,l=0))
+        )
+}
+
+present_de <- function(res, title = "model",  sig = 0.05){
+  purrr::map_df( res, ~{
+    .x %>% 
+      filter( adj_p_val < sig) %>% 
+      mutate(direction = ifelse(log_fc > 0, "up", "down")) %>% 
+      group_by(direction) %>% 
+      tally() %>% 
+      spread(key = direction, value = n, fill = 0 )
+  }, .id = "tissue") %>%
+    mutate(model = title) %>%
+    select(model, everything())
+}
+
+
+
+rerun <- FALSE
+
+```
+
+
+# Differential Expression
+
+Functions for DE
+
+```{r}
+
+runDifferentialExpression <- function(t, design, quantile_norm = FALSE, coef_number = 2, subsetby = NULL, no_sinai = FALSE, return_matrix = FALSE){
+
+  inFile <- here::here( paste0("data/differential_expression/ALS/", t, ".RData"))
+  load(inFile)
+  
+  support_loc <- left_join(support_loc, tech_loc, by = "sample")
+  
+  if(exists("deconv_res")){
+    support_loc <- left_join(support_loc, deconv_res, by = "sample")
+  }
+  
+  if( no_sinai == TRUE){
+    support_loc <- filter(support_loc, site != "Mount Sinai")
+  }
+  
+  if(!is.null(subsetby)){
+    stopifnot(subsetby %in% c("automatic", "manual", "motor_onset", "duration", "onset", "controls"))
+    if( subsetby == "automatic"){
+      support_loc <- filter(support_loc, prep == "Automated KAPA Total")
+      #support_loc <- filter(support_loc, site %in% c("University College London", "Academic Medical Center") )
+    }
+    
+    if(subsetby == "manual"){
+      support_loc <- filter(support_loc, prep == "Manual KAPA Total")
+    }
+    
+    if(subsetby == "motor_onset"){
+      support_loc <- filter(support_loc, disease == "ALS", motor_onset %in% c("Limb", "Bulbar"))
+      print(table(support_loc$motor_onset))
+    }
+    if(subsetby == "duration"){
+      support_loc <- filter(support_loc, disease == "ALS", !is.na(as.numeric(duration))) %>% 
+        mutate(duration = as.numeric(duration))
+      #print(table(support_loc$duration))
+    }
+    
+    if(subsetby == "onset"){
+      support_loc <- filter(support_loc, disease == "ALS", !is.na(as.numeric(onset)))
+      #print(table(support_loc$onset))
+    }
+    
+    if(subsetby == "controls"){
+      support_loc <- filter(support_loc, disease == "Control", !is.na(as.numeric(age))) %>% mutate(age = as.numeric(age))
+      print(table(support_loc$age))
+    }
+  }
+    
+  print(table(support_loc$disease))
+  print(table(support_loc$disease_c9))
+  
+  cols <- c("sex", "site", "disease", "prep", "motor_onset")
+  support_loc <- support_loc %>% mutate_at(cols, funs(factor(.)))
+  
+  # sort out disease comparisons
+  support_loc$disease <- factor(support_loc$disease, levels = c("Control", "ALS"))
+  support_loc$disease_c9 <- factor(support_loc$disease_c9, levels = c("Control", "C9ALS", "sALS"))
+  
+  support_loc$disease_compare <- factor(support_loc$disease_c9, levels = c("sALS", "C9ALS"))
+  if( grepl("disease_compare", design) ){ support_loc <- filter(support_loc, !is.na(disease_compare))}
+  if( grepl("disease_c9", design) ){ support_loc <- filter(support_loc, !is.na(disease_c9))}
+  
+  # squared components
+  support_loc$age_squared <- support_loc$age^2
+  support_loc$rin_squared <- support_loc$rin^2
+
+  # if only 1 prep or site used then remove from formula
+  if( length(unique(support_loc$prep)) == 1){ design <- gsub("\\+ prep", "", design)}
+  if( length(unique(support_loc$site)) == 1){ design <- gsub("\\+ site", "", design)}
+  if( length(unique(support_loc$sex)) == 1){ design <- gsub("\\+ sex", "", design)}
+  
+  design_loc <- as.formula(design)
+
+  ## RUN LIMMA
+  de_res_limma <- 
+    differentialExpression(support_loc, counts_loc, design_formula = design_loc, qnorm = quantile_norm, return_matrix = return_matrix )
+  
+  if( return_matrix == TRUE){return(de_res_limma)}
+  
+  print(summary(decideTests(de_res_limma,adjust.method = "BH", p.value  = "0.05")))
+  limma_res <- extractResults(res = de_res_limma, coef.number = coef_number, method = "limma")
+  
+  return(limma_res)
+}
+
+differentialExpression <- function(
+  support_loc, 
+  counts_loc, 
+  design_formula, 
+  qnorm = FALSE, 
+  gc_length = gc_length_df,
+  return_matrix = FALSE
+  ){
+  # subset counts
+  genes_loc <- counts_loc[, support_loc$sample]
+  # remove low count genes
+  keep.exp <- rowSums(cpm(genes_loc) > 1) >= ceiling(0.5 * ncol(genes_loc)) # important! CHIT1 is removed at 90%; CHAT at 0.5
+  genes_loc <- genes_loc[keep.exp,]
+  
+  design_loc <- model.matrix(design_formula, data = support_loc)
+  
+  stopifnot( nrow(support_loc) == nrow(design_loc))
+  
+  # quantile normalise counts
+  if( qnorm == TRUE){
+    genes_loc <-  EDASeq::betweenLaneNormalization(as.matrix(genes_loc),which = "full")
+  }
+  # normalized counts with TMM
+  norm_loc <- calcNormFactors(genes_loc, method = "TMM") 
+
+  dge <- DGEList(counts=genes_loc, samples=support_loc, norm.factors = norm_loc)  
+
+  v <- voom(dge, design_loc)
+  vfit <- lmFit(v, design_loc)
+  efit <- eBayes(vfit)
+  
+  if( return_matrix == TRUE){ return(v)}
+  
+  return(efit)  
+  
+}
+
+extractResults <- function(res, coef.number, method, shrink_method = "apeglm"){
+  if(method == "limma"){  
+  res <- 
+    topTable(res, coef=coef.number, number = Inf, adjust.method = "BH") %>% 
+      as.data.frame() %>%
+      rownames_to_column(var = "geneid") %>%
+      left_join(gene_meta, by = "geneid") %>%
+      janitor::clean_names() %>%
+      as_tibble()
+  return(res)
+  }
+  if(method == "edgeR"){
+    res <- glmQLFTest(res, coef=coef.number)
+
+    res <- topTags(res, n = "Inf", adjust.method = "BH") %>%
+      as.data.frame() %>%
+      janitor::clean_names() %>%
+      rownames_to_column(var = "geneid") %>%
+      left_join(gene_meta, by = "geneid") %>%
+      as_tibble()
+    return(res)
+  }
+  if(method == "DESeq2"){
+    res <- 
+      lfcShrink(res, coef = coef.number, type = shrink_method, parallel = TRUE) %>%
+      as.data.frame() %>%
+      rownames_to_column(var = "geneid") %>%  
+      left_join(gene_meta, by = "geneid") %>% 
+      arrange(padj) %>%
+      as_tibble()
+    return(res)
+  }
+}
+
+multi_tissue_de <- function(design, qnorm = FALSE, coef = 2, tissue_list = tissues, subsetby = NULL, no_sinai = FALSE, return_matrix = FALSE){
+  de_list <- purrr::map( tissue_list, ~{
+    print(.x)
+    res <- runDifferentialExpression(.x, design = design, quantile_norm = qnorm, coef_number = coef,subsetby = subsetby, no_sinai = no_sinai,  return_matrix = return_matrix)
+    return(res)
+  })
+  names(de_list) <- tissue_list
+  return(de_list)
+}
+
+de_summary <- function(res, sig = 0.05){
+  map_df(res, ~{
+    .x %>%
+      group_by(n_sig = adj_p_val < sig) %>% tally() 
+  }, .id = "tissue") %>% filter(n_sig == TRUE) %>% select(-n_sig)
+}
+
+```
+
+# Designs
+
+
+```{r basic}
+
+# simplest
+design1a  <- "~ disease + sex + rin + rin_squared + age + age_squared + prep + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
+
+# minimal tech metrics
+design1b  <- "~ disease + sex + prep + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_ribosomal_bases + median_3prime_bias + median_5prime_bias"
+
+# all tech metrics
+design1c  <- "~ disease + sex + prep + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+# all tech metrics plus site
+design1d  <- "~ disease + sex + prep + age + age_squared + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+```
+
+# Model 1 - full model with all technical covariates, no quantile normalisation
+
+
+```{r}
+if(rerun){
+  
+  de_res_1a <- multi_tissue_de(design1a, qnorm = FALSE)
+  de_res_1b <- multi_tissue_de(design1b, qnorm = FALSE)
+  de_res_1c <- multi_tissue_de(design1c, qnorm = FALSE)
+  de_res_1d <- multi_tissue_de(design1d, qnorm = FALSE)
+  
+  de_summary(de_res_1a, sig = 0.05)
+  de_summary(de_res_1b, sig = 0.05)
+  de_summary(de_res_1c, sig = 0.05)
+  de_summary(de_res_1d, sig =  0.05)
+  
+  save(de_res_1a, file = here::here("data/differential_expression/ALS/Model_1a_limma_res.RData") )
+  save(de_res_1b, file = here::here("data/differential_expression/ALS/Model_1b_limma_res.RData") )
+  save(de_res_1c, file = here::here("data/differential_expression/ALS/Model_1c_limma_res.RData") )
+  save(de_res_1d, file = here::here("data/differential_expression/ALS/Model_1d_limma_res.RData") )
+  
+}else{
+  load( here::here("data/differential_expression/ALS/Model_1a_limma_res.RData") )
+  load( here::here("data/differential_expression/ALS/Model_1b_limma_res.RData") )
+  load( here::here("data/differential_expression/ALS/Model_1c_limma_res.RData") )
+  load( here::here("data/differential_expression/ALS/Model_1d_limma_res.RData") )
+}
+```
+
+Design 1a - naive model that corrects for sex, rin and prep only, finds 1000s of DEGs in each tissue.
+
+
+# Model 2 - quantile normalised
+
+```{r quantnorm}
+
+if(rerun){
+  
+  de_res_2a <- multi_tissue_de(design1a, qnorm = TRUE)
+  de_res_2b <- multi_tissue_de(design1b, qnorm = TRUE)
+  de_res_2c <- multi_tissue_de(design1c, qnorm = TRUE)
+  de_res_2d <- multi_tissue_de(design1d, qnorm = TRUE)
+  
+  de_summary(de_res_2a, sig = 0.05)
+  de_summary(de_res_2b, sig = 0.05)
+  de_summary(de_res_2c, sig = 0.05)
+  de_summary(de_res_2d, sig =  0.05)
+  
+  save(de_res_2a, file = here::here("data/differential_expression/ALS/Model_2a_limma_res.RData") )
+  save(de_res_2b, file = here::here("data/differential_expression/ALS/Model_2b_limma_res.RData") )
+  save(de_res_2c, file = here::here("data/differential_expression/ALS/Model_2c_limma_res.RData") )
+  save(de_res_2d, file = here::here("data/differential_expression/ALS/Model_2d_limma_res.RData") )
+  
+}else{
+  load( here::here("data/differential_expression/ALS/Model_2a_limma_res.RData") )
+  load( here::here("data/differential_expression/ALS/Model_2b_limma_res.RData") )
+  load( here::here("data/differential_expression/ALS/Model_2c_limma_res.RData") )
+  load( here::here("data/differential_expression/ALS/Model_2d_limma_res.RData") )
+}
+```
+
+## Write out data and tables
+
+```{r}
+de_res_final <- list(de_res_2d$Cervical_Spinal_Cord, de_res_2a$Thoracic_Spinal_Cord, de_res_2d$Lumbar_Spinal_Cord)
+#names(de_res_final) <- c("Cervical Spinal Cord", "Thoracic Spinal Cord", "Lumbar Spinal Cord")
+names(de_res_final) <- c("CSC", "TSC", "LSC")
+
+save(de_res_final, file = here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res.RData"))
+
+
+
+names(de_res_final) <- c("Cervical", "Thoracic", "Lumbar")
+```
+
+
+
+```{r}
+
+names(de_res_final) <- c("CSC", "TSC", "LSC")
+
+als_deg_table <- 
+list(
+de_res_final$CSC %>%
+  select(genename, geneid, cervical.lfc = log_fc, cervical.t = t, cervical.p = p_value, cervical.fdr = adj_p_val),
+de_res_final$TSC %>%
+  select(genename, geneid, thoracic.lfc = log_fc, thoracic.t = t, thoracic.p = p_value, thoracic.fdr = adj_p_val),
+de_res_final$LSC %>%
+  select(genename, geneid, lumbar.lfc = log_fc, lumbar.t = t, lumbar.p = p_value, lumbar.fdr = adj_p_val) 
+) %>%
+  reduce( left_join, by = c("genename", "geneid")) %>%
+  arrange(cervical.p)
+
+
+write_tsv(als_deg_table, "../../ALS_SC/tables/als_control_deg_combined.tsv")
+
+```
+
+
+
+
+
+# Model 5 - quantile normalised AND Sinai Controls removed
+
+```{r no_sinai}
+
+if(rerun){
+  
+  de_res_5a <- multi_tissue_de(design1a, qnorm = TRUE, no_sinai = TRUE)
+  de_res_5b <- multi_tissue_de(design1b, qnorm = TRUE, no_sinai = TRUE)
+  de_res_5c <- multi_tissue_de(design1c, qnorm = TRUE, no_sinai = TRUE)
+  de_res_5d <- multi_tissue_de(design1d, qnorm = TRUE, no_sinai = TRUE)
+  
+  de_summary(de_res_5a, sig = 0.05)
+  de_summary(de_res_5b, sig = 0.05)
+  de_summary(de_res_5c, sig = 0.05)
+  de_summary(de_res_5d, sig =  0.05)
+  
+  save(de_res_5a, file = here::here("data/differential_expression/ALS/Model_5a_limma_res.RData") )
+  save(de_res_5b, file = here::here("data/differential_expression/ALS/Model_5b_limma_res.RData") )
+  save(de_res_5c, file = here::here("data/differential_expression/ALS/Model_5c_limma_res.RData") )
+  save(de_res_5d, file = here::here("data/differential_expression/ALS/Model_5d_limma_res.RData") )
+  
+}else{
+  load( here::here("data/differential_expression/ALS/Model_5a_limma_res.RData") )
+  load( here::here("data/differential_expression/ALS/Model_5b_limma_res.RData") )
+  load( here::here("data/differential_expression/ALS/Model_5c_limma_res.RData") )
+  load( here::here("data/differential_expression/ALS/Model_5d_limma_res.RData") )
+}
+```
+
+# C9 ALS vs Sporadic ALS
+
+## Model 3a  separate C9 ALS from sALS 
+## Control vs C9
+
+```{r c9orf72}
+design2  <- "~ disease_c9 + sex + prep + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+design3 <- "~ disease_compare + sex + prep + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_ribosomal_bases + median_3prime_bias + median_5prime_bias"
+
+if(rerun){
+  # control vs C9
+  de_res_3a <- multi_tissue_de(design2, qnorm = TRUE, coef = 2)
+  # control vs sALS
+  de_res_3b <- multi_tissue_de(design2, qnorm = TRUE, coef = 3)
+  # c9 vs sALS
+  de_res_3c <- multi_tissue_de(design3, qnorm = TRUE, coef = 2)
+  
+  
+  save(de_res_3a, file = here::here("data/differential_expression/ALS/Model_3a_limma_res.RData"))
+  save(de_res_3b, file = here::here("data/differential_expression/ALS/Model_3b_limma_res.RData"))
+  save(de_res_3c, file = here::here("data/differential_expression/ALS/Model_3c_limma_res.RData"))
+}else{
+  load(here::here("data/differential_expression/ALS/Model_3a_limma_res.RData"))
+  load(here::here("data/differential_expression/ALS/Model_3b_limma_res.RData"))
+  load(here::here("data/differential_expression/ALS/Model_3c_limma_res.RData"))
+}
+
+
+de_summary(de_res_3a, sig = 0.05)
+de_summary(de_res_3b, sig = 0.05)
+de_summary(de_res_3c, sig =  0.05)
+
+
+```
+
+## Compare just automatic or just manual prep samples
+
+```{r batches}
+design4 <- "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + median_3prime_bias + median_5prime_bias"
+
+batch_tissues <- c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord")
+
+if(rerun){
+de_res_4a <- multi_tissue_de(design4, qnorm = TRUE, coef = 2, subsetby = "automatic", tissue_list = batch_tissues, no_sinai = TRUE )
+de_res_4b <- multi_tissue_de(design4, qnorm = TRUE, coef = 2, subsetby = "manual", tissue_list = batch_tissues,  no_sinai = TRUE )
+de_summary(de_res_4a)
+de_summary(de_res_4b)
+#table(de_res_4$Lumbar_Spinal_Cord$adj_p_val < 0.15)
+
+save(de_res_4a, file = here::here("data/differential_expression/ALS/Model_4a_limma_res.RData"))
+save(de_res_4b, file = here::here("data/differential_expression/ALS/Model_4b_limma_res.RData"))
+}else{
+  load(here::here("data/differential_expression/ALS/Model_4a_limma_res.RData"))
+  load(here::here("data/differential_expression/ALS/Model_4b_limma_res.RData")) 
+}
+```
+
+
+# Compare Site of Motor Onset in Spinal Cord
+
+```{r}
+# simplest
+#age + age_squared + 
+design6a  <- "~ motor_onset + sex + rin + rin_squared + prep + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
+
+# minimal tech metrics
+design6b  <- "~ motor_onset + sex + prep + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_ribosomal_bases + median_3prime_bias + median_5prime_bias"
+
+# all tech metrics
+design6c  <- "~ motor_onset + sex + prep + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+# all tech metrics plus site
+design6d  <- "~ motor_onset + sex + prep + age + age_squared + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+
+
+if(rerun){
+  de_res_6a <- multi_tissue_de(design6a, qnorm = TRUE, coef = 2, subsetby = "motor_onset" )
+  de_res_6b <- multi_tissue_de(design6b, qnorm = TRUE, coef = 2, subsetby = "motor_onset" )
+  de_res_6c <- multi_tissue_de(design6c, qnorm = TRUE, coef = 2, subsetby = "motor_onset" )
+  de_res_6d <- multi_tissue_de(design6d, qnorm = TRUE, coef = 2, subsetby = "motor_onset" )
+  
+
+  #table(de_res_4$Lumbar_Spinal_Cord$adj_p_val < 0.15)
+  
+  save(de_res_6a, file = here::here("data/differential_expression/ALS/Model_6a_limma_res.RData"))
+  save(de_res_6b, file = here::here("data/differential_expression/ALS/Model_6b_limma_res.RData"))
+  save(de_res_6c, file = here::here("data/differential_expression/ALS/Model_6c_limma_res.RData"))
+  save(de_res_6d, file = here::here("data/differential_expression/ALS/Model_6d_limma_res.RData"))
+}else{
+  load(here::here("data/differential_expression/ALS/Model_6a_limma_res.RData"))
+  load(here::here("data/differential_expression/ALS/Model_6b_limma_res.RData"))  
+  load(here::here("data/differential_expression/ALS/Model_6c_limma_res.RData"))    
+  load(here::here("data/differential_expression/ALS/Model_6d_limma_res.RData")) 
+}
+
+de_summary(de_res_6a)
+de_summary(de_res_6b)
+de_summary(de_res_6c)
+de_summary(de_res_6d)
+```
+
+No differences between bulbar and limb onset patients in any spinal cord section.
+
+
+```{r}
+make_count_matrix <- function(de_res){
+  df <- de_res$E %>%
+    as.data.frame() %>%
+    rownames_to_column(var = "geneid") %>%
+    dplyr::left_join(gene_meta, by = "geneid") %>%
+    dplyr::select(-geneid) %>%
+    dplyr::filter( !duplicated(genename) & !is.na(genename)) %>%
+    column_to_rownames(var = "genename")
+      
+  return(df)
+}
+
+if(rerun){
+  
+  lsc_df <- runDifferentialExpression(t = "Lumbar_Spinal_Cord", design = "~ 1", return_matrix = TRUE) %>% make_count_matrix()
+  csc_df <- runDifferentialExpression(t = "Cervical_Spinal_Cord", design = "~ 1", return_matrix = TRUE) %>% make_count_matrix()
+  tsc_df <- runDifferentialExpression(t = "Thoracic_Spinal_Cord", design = "~ 1", return_matrix = TRUE) %>% make_count_matrix()
+
+  save(lsc_df, csc_df, tsc_df, file = here::here("data/differential_expression/ALS/ALS_Spinal_Cord_count_matrices.RData"))
+}
+
+```
+
+
+# Differential expression after adjusting for microglia and astrocyte proportions
+
+```{r}
+# CGND-HRA-00431 duplicated?
+deconv_res <- read_tsv(here::here("data/deconvolution/Mathys_MuSiC_residual_results.tsv")) %>%
+  filter(sample != "CGND-HRA-00431") %>%
+  select(sample, cell, deconv) %>%
+  pivot_wider(names_from = cell, values_from = deconv)
+
+design7a  <- "~ disease + Mic + Ast + Oli + sex + rin + rin_squared + age + age_squared + prep + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
+
+design7d  <- "~ disease + Mic + Ast + Oli + sex + prep + age + age_squared + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+
+if(rerun){
+  de_res_7a <- multi_tissue_de(design7a, qnorm = TRUE, coef = 2)
+  de_res_7d <- multi_tissue_de(design7d, qnorm = TRUE, coef = 2)
+  
+  de_summary(de_res_7a)
+  de_summary(de_res_7d)
+  #table(de_res_4$Lumbar_Spinal_Cord$adj_p_val < 0.15)
+  
+  save(de_res_7a, file = here::here("data/differential_expression/ALS/Model_7a_limma_res.RData"))
+  save(de_res_7d, file = here::here("data/differential_expression/ALS/Model_7d_limma_res.RData"))
+  
+  # pick the models for each tissue
+  model_7_final <- list(CSC = de_res_7d$Cervical_Spinal_Cord, LSC = de_res_7d$Lumbar_Spinal_Cord, TSC = de_res_7a$Thoracic_Spinal_Cord)
+  
+  save(model_7_final, file = here::here("data/differential_expression/ALS/Model_7_limma_res.RData") )
+
+}else{
+  load(here::here("data/differential_expression/ALS/Model_7a_limma_res.RData"))
+  load(here::here("data/differential_expression/ALS/Model_7d_limma_res.RData")) 
+}
+
+de_summary(de_res_7a)
+de_summary(de_res_7d)
+
+
+
+
+```
+
+# Age of onset effects, accounting for age at death
+
+
+Look at onset and duration in ALS
+
+What about in the controls? How does age alter the spinal cord transcriptome?
+
+```{r}
+support <-read_tsv(here::here("data/differential_expression/ALS/ALS_all_differential_expression_support.tsv"))
+support <- mutate(support, duration = as.numeric(duration) )
+
+# plot relationships between onset, duration and death
+support %>% 
+  select(donor, onset, age, duration) %>% distinct() %>% 
+  ggplot(aes(y = onset, x = age)) + 
+  labs(x = "Age at death", y = "Age at onset") + 
+  geom_abline(slope = 1, intercept = 0) + xlim(25,80) + ylim(25,80) + 
+  theme_jh() + 
+  geom_segment(aes(x = onset, xend = age, y = onset, yend = onset))+ geom_point(colour = "red") +
+support %>% 
+  select(donor, onset, age, duration) %>% distinct() %>% 
+  ggplot(aes(y = duration /12, x = onset)) + labs(x = "Age at onset", y = "Disease duration, years") +
+  theme_jh() + 
+  geom_point(colour = "red") +
+  geom_smooth()
+
+
+# support %>% filter(disease == "Control") %>% select(donor, age) %>% distinct() %>% 
+#   ggplot(aes(x = age, y = age)) + 
+#   geom_point(colour = "blue")
+
+
+
+```
+
+# Duration effects, accounting for age at death
+
+```{r}
+
+
+design8a  <- "~ duration + sex + rin + rin_squared + age + age_squared + prep + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
+
+design8d  <- "~ duration + sex + prep + age + age_squared + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+# without correcting for age
+design8e  <- "~ duration + sex + prep + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+if(rerun){
+  de_res_8a <- multi_tissue_de(design8a, qnorm = TRUE, coef = 2, subsetby = "duration")
+  de_res_8d <- multi_tissue_de(design8d, qnorm = TRUE, coef = 2, subsetby = "duration")
+  de_res_8e <- multi_tissue_de(design8e, qnorm = TRUE, coef = 2, subsetby = "duration")
+
+  de_summary(de_res_8a)
+  de_summary(de_res_8d)
+  de_summary(de_res_8e)
+  #table(de_res_4$Lumbar_Spinal_Cord$adj_p_val < 0.15)
+  
+  save(de_res_8a, file = here::here("data/differential_expression/ALS/Model_8a_limma_res.RData"))
+  save(de_res_8d, file = here::here("data/differential_expression/ALS/Model_8d_limma_res.RData"))
+  save(de_res_8e, file = here::here("data/differential_expression/ALS/Model_8e_limma_res.RData"))
+
+
+}else{
+  load(here::here("data/differential_expression/ALS/Model_8a_limma_res.RData"))
+  load(here::here("data/differential_expression/ALS/Model_8d_limma_res.RData")) 
+  load(here::here("data/differential_expression/ALS/Model_8e_limma_res.RData")) 
+    # pick the models for each tissue
+  model_8_final <- list(CSC = de_res_8d$Cervical_Spinal_Cord, LSC = de_res_8d$Lumbar_Spinal_Cord, TSC = de_res_8a$Thoracic_Spinal_Cord)
+  #de_res_final <- model_8_final
+  save(model_8_final, file = here::here("data/differential_expression/ALS/Model_8_limma_res.RData") )
+
+}
+
+de_summary(de_res_8a)
+de_summary(de_res_8d)
+
+list(
+present_de(de_res_8a, title = "duration - simple"),
+present_de(de_res_8d, title = "duration - complex"),
+present_de(de_res_8e, title = "duration - complex, without age correction")
+) %>% bind_rows()
+```
+
+Combine tissues for supplementary table
+
+```{r}
+
+duration_deg_table <- 
+list(
+model_8_final$CSC %>%
+  select(genename, geneid, cervical.lfc = log_fc, cervical.t = t, cervical.p = p_value, cervical.fdr = adj_p_val),
+model_8_final$TSC %>%
+  select(genename, geneid, thoracic.lfc = log_fc, thoracic.t = t, thoracic.p = p_value, thoracic.fdr = adj_p_val),
+model_8_final$LSC %>%
+  select(genename, geneid, lumbar.lfc = log_fc, lumbar.t = t, lumbar.p = p_value, lumbar.fdr = adj_p_val) 
+) %>%
+  reduce( left_join, by = c("genename", "geneid")) %>%
+  arrange(cervical.p)
+
+
+write_tsv(duration_deg_table, "../../ALS_SC/tables/duration_deg_combined.tsv")
+```
+
+
+
+## Age of disease onset (age at death - duration)
+
+```{r}
+
+
+design9a  <- "~ onset + sex + rin + rin_squared + age + prep + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
+
+design9d  <- "~ onset + sex + prep + age + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+# don't account for age of death
+design9e <- "~ onset + sex + prep + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+# age without onset
+design9f <- "~ age + sex + prep + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+
+if(rerun){
+  de_res_9a <- multi_tissue_de(design9a, qnorm = TRUE, coef = 2, subsetby = "onset")
+  de_res_9d <- multi_tissue_de(design9d, qnorm = TRUE, coef = 2, subsetby = "onset")
+  de_res_9e <- multi_tissue_de(design9e, qnorm = TRUE, coef = 2, subsetby = "onset")
+  de_res_9f <- multi_tissue_de(design9f, qnorm = TRUE, coef = 2, subsetby = "onset")
+
+  de_summary(de_res_9a)
+  de_summary(de_res_9d)
+  de_summary(de_res_9e)
+  #table(de_res_4$Lumbar_Spinal_Cord$adj_p_val < 0.15)
+  
+  save(de_res_9a, file = here::here("data/differential_expression/ALS/Model_9a_limma_res.RData"))
+  save(de_res_9d, file = here::here("data/differential_expression/ALS/Model_9d_limma_res.RData"))
+  save(de_res_9e, file = here::here("data/differential_expression/ALS/Model_9e_limma_res.RData"))
+
+
+}else{
+  load(here::here("data/differential_expression/ALS/Model_9a_limma_res.RData"))
+  load(here::here("data/differential_expression/ALS/Model_9e_limma_res.RData")) 
+    load(here::here("data/differential_expression/ALS/Model_9d_limma_res.RData")) 
+    #load(here::here("data/differential_expression/ALS/Model_9f_limma_res.RData")) 
+
+  #   # pick the models for each tissue
+  # model_9_final <- list(CSC = de_res_9d$Cervical_Spinal_Cord, LSC = de_res_9d$Lumbar_Spinal_Cord, TSC = de_res_9a$Thoracic_Spinal_Cord)
+  # 
+  # save(model_8_final, file = here::here("data/differential_expression/ALS/Model_8_limma_res.RData") )
+
+}
+list(
+  present_de(de_res_9a, title = "onset - simple"),
+  present_de(de_res_9d, title = "onset - complex"),
+  present_de(de_res_9e, title = "onset - complex - don't account for age")
+ # present_de(de_res_9f, title = "age only - complex")
+) %>% bind_rows()
+```
+
+
+Age at death in the controls and ALS patients separately
+
+```{r}
+
+design10a  <- "~ age + sex + rin + rin_squared + prep + gPC1 + gPC2 + gPC3"
+
+design10d  <- "~ age + sex + prep +  site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+
+
+if(rerun){
+  # just controls
+  de_res_10a <- multi_tissue_de(design10a, qnorm = TRUE, coef = 2, subsetby = "controls", tissue_list = c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord"))
+  # just ALS
+  de_res_10d <- multi_tissue_de(design10d, qnorm = TRUE, coef = 2, subsetby = "duration")
+  
+  de_summary(de_res_10a)
+  de_summary(de_res_10d)
+  #table(de_res_4$Lumbar_Spinal_Cord$adj_p_val < 0.15)
+  
+  save(de_res_10a, file = here::here("data/differential_expression/ALS/Model_10a_limma_res.RData"))
+  save(de_res_10d, file = here::here("data/differential_expression/ALS/Model_10d_limma_res.RData"))
+  
+
+}else{
+  load(here::here("data/differential_expression/ALS/Model_10a_limma_res.RData"))
+  load(here::here("data/differential_expression/ALS/Model_10d_limma_res.RData")) 
+  #   # pick the models for each tissue
+  # model_8_final <- list(CSC = de_res_10d$Cervical_Spinal_Cord, LSC = de_res_10d$Lumbar_Spinal_Cord, TSC = de_res_10a$Thoracic_Spinal_Cord)
+  # 
+  # save(model_10_final, file = here::here("data/differential_expression/ALS/Model_10_limma_res.RData") )
+
+}
+
+present_de(de_res_10a, "age at death - controls only")
+present_de(de_res_10d, "age at death - ALS cases only")
+
+
+```
+
+
+
+
+CHIT1 as an example.  CHIT1 is strongly upregulated in ALS samples compared to controls in all 3 tissues.
+CHIT1 expression is negatively correlated with ALS disease duration, with and without correcting for age at death.
+CHIT1 expression is positively correlated with ALS disease onset when age at death is corrected for.
+However, this effect of onset disappears when you remove age from the model.
+
+
+HAVCR2 is associated with CD8+ T-cells - intriguing.
+
+
+
+
+
+```{r}
+# p-value histogram for each tissue
+pvalue_hist <- function(res, title = ""){
+map2(.x = res, .y = names(res), ~{ ggplot(.x, aes(x = p_value) ) + geom_histogram() + labs(title = unique(.y) ) } ) %>% 
+    patchwork::wrap_plots() +
+    plot_annotation(title = title)
+}
+
+pvalue_hist(de_res_2a, "2a")
+pvalue_hist(de_res_2b, "2b")
+pvalue_hist(de_res_2c, "2c")
+pvalue_hist(de_res_2d, "2d")
+
+pvalue_hist(de_res_2a, "5a")
+pvalue_hist(de_res_2b, "5b")
+pvalue_hist(de_res_2c, "5c")
+pvalue_hist(de_res_2d, "5d")
+```
+
+
+
+```{r}
+
+#present_de(de_res_2)
+
+list(
+present_de(de_res_1a, title = "Control vs all ALS - simplest"),
+present_de(de_res_1b, title = "Control vs all ALS - more complex"), 
+present_de(de_res_1c, title = "Control vs all ALS - complex"),
+present_de(de_res_1d, title = "Control vs all ALS - most complex"), 
+present_de(de_res_2c, title = "Control vs all ALS; quantile normalised"), 
+present_de(de_res_3a, title = "Control vs C9 ALS"),
+present_de(de_res_3b, title = "Control vs non-C9 ALS"), 
+present_de(de_res_3c, title = "C9 vs non-C9 ALS"), 
+present_de(de_res_4a, title = "Control vs all ALS - KAPA Automatic samples only"),
+present_de(de_res_4b, title = "Control vs all ALS - KAPA Manual samples only"),
+present_de(de_res_8d, title = "ALS duration in months"),
+present_de(de_res_9d, title = "ALS onset in months"),
+present_de(de_res_10a, "age at death - controls only"),
+present_de(de_res_10d, "age at death - ALS cases only"),
+present_de(de_res_9a, title = "onset - simple"),
+present_de(de_res_9d, title = "onset - complex"),
+present_de(de_res_9e, title = "onset - complex - don't account for age"),
+#present_de(de_res_9f, title = "age only - complex"),
+present_de(de_res_8a, title = "duration - simple"),
+present_de(de_res_8d, title = "duration - complex"),
+present_de(de_res_8e, title = "duration - complex, without age correction")
+) %>% bind_rows()
+
+```
+
+
+# Correlate log2 Fold Change estimates between tissues. 
+
+Use signed Z score (equivalent to t statistic from Limma)
+
+```{r}
+tissues <- c( "Lumbar_Spinal_Cord", "Cervical_Spinal_Cord", "Thoracic_Spinal_Cord")
+
+```
+
+
+```{r fig.width = 5, fig.height = 5}
+
+# pairwise correlations of fold-changes between ALS and Controls in pairs of tissues
+de_correlation <- function(model_list1, model_list2, tissue1, tissue2, col = "t"){
+  res <- dplyr::left_join(model_list1[[tissue1]], model_list2[[tissue2]],  by = c("genename", "geneid") , suffix = c(".1", ".2") ) 
+  x <- res[[ paste0(col, ".1")]]
+  y <- res[[ paste0(col, ".2")]]
+  
+  cor.pearson <- broom::tidy(cor.test(x,y, method = "pearson"))
+  cor.spearman <- broom::tidy(cor.test(x,y, method = "spearman"))
+  output <- dplyr::bind_rows(cor.spearman, cor.pearson)#, linear.mod) 
+  output$method <- c("spearman", "pearson")#, "lm")
+  output$tissue1 <- tissue1
+  output$tissue2 <- tissue2
+  output <- dplyr::select(output, tissue1, tissue2, everything() )
+  return(output)
+}
+
+
+run_cor <- function(mod1, mod2, col = "t", tissue_list = tissues){
+  pairwise_tissues <- expand.grid(tissue_list, tissue_list, stringsAsFactors = FALSE)
+  res <- 
+  map2_df(.x = pairwise_tissues$Var1, .y = pairwise_tissues$Var2, ~{
+  de_correlation(model_list1 = mod1, model_list2 = mod2, .x,.y, col = "t")
+  })
+  return(res)
+}
+
+plot_cor_res <- function(data, method = "pearson", title = NULL){
+  data %>%
+  filter(method == "pearson") %>%
+  mutate(estimate = signif(estimate, digits = 2)) %>%
+  select(tissue1, tissue2, estimate) %>%
+  mutate(tissue1 = gsub("_", "\n", tissue1)) %>%
+  mutate(tissue2 = gsub("_", "\n", tissue2)) %>%
+  pivot_wider(names_from = tissue2, values_from = estimate) %>%
+  column_to_rownames(var = "tissue1") %>%
+  as.matrix() %>%
+  corrplot(type = "upper", order = "hclust", tl.col = "black", tl.srt = 90,method = "color",addCoef.col = "black",number.cex = .7,tl.cex = 0.5, title = title)
+  
+}
+
+```
+
+```{r}
+cor_res_1a <- run_cor(de_res_1a, de_res_1a, col = "t")
+cor_res_1b <- run_cor(de_res_1b, de_res_1b, col = "t")
+cor_res_1c <- run_cor(de_res_1c, de_res_1c, col = "t")
+cor_res_1d <- run_cor(de_res_1d, de_res_1d, col = "t")
+
+cor_res_2a <- run_cor(de_res_2a, de_res_2a, col = "t")
+cor_res_2b <- run_cor(de_res_2b, de_res_2b, col = "t")
+cor_res_2c <- run_cor(de_res_2d, de_res_2c, col = "t")
+cor_res_2d <- run_cor(de_res_2d, de_res_2d, col = "t")
+
+cor_res_5c <- run_cor(de_res_5d, de_res_5c, col = "t")
+cor_res_5d <- run_cor(de_res_5d, de_res_5d, col = "t")
+
+cor_res_3a <- run_cor(de_res_3a, de_res_3a, col = "t")
+cor_res_3b <- run_cor(de_res_3b, de_res_3b, col = "t")
+cor_res_3c <- run_cor(de_res_3c, de_res_3c, col = "t")
+# effect of quantile normalisation
+cor_res_qn <- run_cor(de_res_1b, de_res_2b, col = "t")
+
+# correlate between batches
+cor_res_batch <- run_cor(de_res_4a, de_res_4b, col = "t", tissue_list = batch_tissues)
+
+cor_res_duration <- run_cor(model_8_final, model_8_final, col = "t", tissue_list = c("CSC", "LSC", "TSC") )
+
+plot_cor_res(cor_res_1a, title = "Model 1a")
+plot_cor_res(cor_res_1b, title = "Model 1b")
+plot_cor_res(cor_res_1c, title = "Model 1c")
+plot_cor_res(cor_res_1d, title = "Model 1d")
+
+plot_cor_res(cor_res_2a, title = "Model 2a")
+plot_cor_res(cor_res_2b, title = "Model 2b")
+plot_cor_res(cor_res_2c, title = "Model 2c")
+plot_cor_res(cor_res_2d, title = "Model 2d")
+
+plot_cor_res(cor_res_5c, title = "Model 5c")
+plot_cor_res(cor_res_5d, title = "Model 5d")
+
+plot_cor_res(cor_res_3a, title = "Model 3a")
+plot_cor_res(cor_res_3b, title = "Model 3b")
+plot_cor_res(cor_res_3b, title = "Model 3c")
+
+plot_cor_res(cor_res_qn, title = "Quantile Norm")
+plot_cor_res(cor_res_batch, title = "Between Batches")
+plot_cor_res(cor_res_duration, title = "Disease duration")
+
+
+```
+
+The simplest DE model shows large >0.5 correlations between every tissue. But as the models get larger to account for more and more technical variation, the correlation structure shifts to only retain correlation between the two motor cortices and the three spinal cord samples. Importantly, correlation between CSP and LSP remains high (0.87-0.9) throughout model selection.
+
+Quantile normalisation has little impact on the correlation structure.
+
+Splitting samples by sequencing prep type and comparing DE between the two batches shows correlation in LSP and CSP (0.72, 0.55 and lower and even negative correlation in Cerebellum and Frontal Cortex (0.22, -0.26).
+
+For Thoracic Spinal Cord use model 2a - simple model.
+
+
+```{r}
+present_de(de_res_final, title = "Control vs ALS")
+present_de(de_res_3a, title = "Control vs C9ALS")
+present_de(de_res_3b, title = "Control vs SALS")
+present_de(de_res_3c, title = "C9ALS vs SALS")
+
+
+```
+
+
+
+
+```{r}
+cor_res_final <- run_cor(de_res_final, de_res_final, col = "t", tissue_list = c("CSC", "TSC", "LSC"))
+plot_cor_res(cor_res_final)
+
+```
+
+Observations
+
+Frontal Cortex - Cerebellum correlation increases when comparing sALS to control (pearson rho = 0.36) to C9AL S vs control (rho = 0.44 )
+
+Lateral Motor Cortex has a higher correlation to Cervical and Lumbar Spinal Cord than any other cortical region.
+Temporal Cortex has the lowest correlation with every other tissue.
+
+## Plot per-gene correlation
+
+
+```{r fig.width = 9, fig.height = 3}
+
+plot_de_correlation <- function(model_list1, model_list2, tissue1, tissue2, col = "t", highlight = NULL){
+  require(ggrepel)
+  res <- dplyr::left_join(model_list1[[tissue1]], model_list2[[tissue2]],  by = c("genename", "geneid") , suffix = c(".1", ".2") ) 
+  
+  x_string <- paste0(col, ".1")
+  y_string <- paste0(col, ".2")
+  plot <- res %>%
+    ggplot(aes_string(x = x_string, y = y_string )) + 
+    labs(x = gsub("_", " ", tissue1), y = gsub("_", " ", tissue2) ) + 
+    theme_bw() + 
+    ggpubr::stat_cor(method = "pearson", aes(label = ..r.label..) ) +
+    geom_hline(yintercept = 0, linetype = 3) + geom_vline(xintercept = 0, linetype = 3) +
+    geom_abline(slope =1 , intercept = 0, linetype = 3) +    
+    #geom_point(size = 1, alpha = 0.1) + 
+    geom_bin2d(bins = 100) +
+    scale_fill_continuous(type = "viridis") +
+    guides(fill = FALSE) +
+    #xlim(-10,10) + ylim(-8,8) +
+    theme_jh()
+  
+  if(!is.null(highlight)){
+    plot <- plot +
+      geom_point(data = filter(res, genename %in% highlight), aes_string(x = x_string, y = y_string), colour = "red") +
+      geom_text_repel(data = filter(res, genename %in% highlight), aes_string(x = x_string, y = y_string, label = "genename"), colour = "red")
+  }
+  
+  return(plot)
+}
+
+names(de_res_final) <-c("Lumbar", "Cervical", "Thoracic")
+t_stat_plot <- 
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Lumbar")  +
+  
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Thoracic", tissue2 = "Lumbar")  +
+
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Thoracic") +
+  plot_annotation(title = "1. T-statistic") &  
+  xlim(-10,10) & ylim(-8,8) 
+
+ggsave(plot = t_stat_plot, filename = "../../ALS_SC/plots/deg_t_stat_cor.pdf", width = 8.5, height = 3)
+
+lfc_plot <- 
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Lumbar", col = "log_fc")  +
+  
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Thoracic", tissue2 = "Lumbar", col = "log_fc")  +
+
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Thoracic", col = "log_fc") +
+  plot_annotation(title = expression("2."~log[2]~"fold change") ) &
+  ylim(-3,5) & xlim(-3,5) 
+
+ggsave(plot = lfc_plot, filename = "../../ALS_SC/plots/deg_lfc_cor.pdf", width = 8.5, height = 3)
+
+t_stat_plot
+
+lfc_plot
+
+
+#plot_de_correlation(model_list1 = model_8_final, model_list2 = model_8_final, tissue1 = "CSC", tissue2 = "LSC", col = "t" )
+
+```
+
+```{r}
+dur_cor_plot <- 
+  plot_de_correlation(model_list1 = model_8_final, model_list2 = model_8_final, tissue1 = "CSC", tissue2 = "LSC", col = "t" ) + 
+  labs(title = "i) T statistic ", x = "Cervical", y ="Lumbar") +
+  plot_de_correlation(model_list1 = model_8_final, model_list2 = model_8_final, tissue1 = "CSC", tissue2 = "LSC", col = "log_fc" ) + 
+  labs(title = "ii) Log2 fold change", x = "Cervical", y ="Lumbar") +
+  plot_annotation(title = "Disease duration associated genes")
+
+dur_cor_plot  
+
+ggsave(plot = dur_cor_plot, filename = "../../ALS_SC/plots/dur_cor_plot.pdf", width = 7, height = 3)
+
+```
+
+
+
+ALS vs Control effects are correlated between LSC and CSC despite having 10x more DEGs in CSC.
+
+```{r}
+plot_de_correlation(model_list1 = de_res_4a, model_list2 = de_res_4b, tissue1 = "Cervical_Spinal_Cord", tissue2 = "Cervical_Spinal_Cord") +
+  plot_de_correlation(model_list1 = de_res_4a, model_list2 = de_res_4b, tissue1 = "Lumbar_Spinal_Cord", tissue2 = "Lumbar_Spinal_Cord") +
+  plot_annotation(title = "Comparing effect sizes between sequencing prep batches")
+  
+  
+```
+
+Compare C9ALS and sALS
+
+```{r}
+names(de_res_3a) <- c("Lumbar", "Cervical", "Thoracic")
+names(de_res_3b) <- c("Lumbar", "Cervical", "Thoracic")
+
+c9_plot <- 
+  plot_de_correlation(model_list1 = de_res_3a, model_list2 = de_res_3b, tissue1 = "Cervical", tissue2 = "Cervical", highlight = "C9orf72") +
+  labs(x = "Control vs C9ALS", y = "Control vs sALS", subtitle = "Cervical Spinal Cord") +
+  plot_de_correlation(model_list1 = de_res_3a, model_list2 = de_res_3b, tissue1 = "Lumbar", tissue2 = "Lumbar", highlight = "C9orf72") +
+  labs(x = "Control vs C9ALS", y = "Control vs sALS", subtitle = "Lumbar Spinal Cord") +
+    plot_de_correlation(model_list1 = de_res_3a, model_list2 = de_res_3b, tissue1 = "Thoracic", tissue2 = "Thoracic", highlight = "C9orf72") +
+  labs(x = "Control vs C9ALS", y = "Control vs sALS", subtitle = "Thoracic Spinal Cord") +
+  plot_annotation(title = "Comparing C9orf72-ALS to Sporadic ALS") &
+  theme(plot.subtitle = element_text(hjust = 0.5))
+
+c9_plot 
+
+ggsave(plot = c9_plot, filename = "../../ALS_SC/plots/deg_c9_cor_plot.pdf", width = 8.5, height = 3)
+
+map_df(de_res_3c, ~{filter(.x, genename == "C9orf72") }, .id = "tissue")
+```
+
+
+Compare age of onset with duration
+
+```{r}
+
+highlight_genes <-  c("CHIT1", "IGF2BP2", "PON3")
+
+plot_de_correlation(model_list1 = de_res_8e, model_list2 = de_res_8e, tissue1 = "Cervical_Spinal_Cord", tissue2 = "Lumbar_Spinal_Cord", highlight =  highlight_genes ) +
+  labs(subtitle = "Disease duration - across tissues") +
+  plot_de_correlation(model_list1 = de_res_9e, model_list2 = de_res_9e, tissue1 = "Cervical_Spinal_Cord", tissue2 = "Lumbar_Spinal_Cord", highlight =   highlight_genes ) +
+      labs(subtitle = "Disease onset - across tissues") +
+  plot_de_correlation(model_list1 = de_res_8e, model_list2 = de_res_9e, tissue1 = "Cervical_Spinal_Cord", tissue2 = "Cervical_Spinal_Cord", highlight =   highlight_genes) +
+  labs(subtitle = "Cervical Spinal Cord - duration vs onset", x = "Duration", y = "Onset" )  + 
+    plot_de_correlation(model_list1 = de_res_8e, model_list2 = de_res_9e, tissue1 = "Lumbar_Spinal_Cord", tissue2 = "Lumbar_Spinal_Cord", highlight =   highlight_genes ) +
+  labs(subtitle = "Lumbar Spinal Cord - duration vs onset", x = "Duration", y = "Onset" )  + 
+
+  plot_annotation(title = "Comparing effect sizes between disease duration and age of onset")
+  
+```
+

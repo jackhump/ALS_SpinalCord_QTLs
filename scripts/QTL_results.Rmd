@@ -1,0 +1,263 @@
+---
+title: "ALS QTLs"
+author: "Jack Humphrey"
+date: "`r Sys.Date()`"
+output: 
+  rmarkdown::html_document:
+    theme: spacelab
+    highlight: zenburn
+    code_folding: hide
+    toc: true
+    toc_float: true
+    smooth_scroll: true
+    number_sections: false
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(here)
+library(tidyverse)
+library(ggrepel)
+library(patchwork)
+library(gt)
+library(snakecase)
+
+theme_jh <- function () { 
+    theme_bw(base_size=8, base_family="Helvetica") %+replace% 
+        theme(
+          panel.grid = element_blank(),
+          strip.background = element_blank(),
+          #panel.border = element_blank(),
+          axis.line = element_line(),
+          #text = element_text(color = "black"), 
+          strip.text = element_text(color = "black"),
+          axis.text = element_text(colour = "black"),
+          axis.ticks = element_line(colour = "black"),
+            panel.background  = element_blank(),
+            plot.background = element_rect(fill="white", colour=NA), 
+            legend.background = element_rect(fill="transparent", colour=NA),
+            legend.key = element_rect(fill="transparent", colour=NA), 
+            axis.line.y = element_line(), strip.text.x = element_text(face = "bold", margin = margin(t = 2,r = 0,b = 2,l=0))
+        )
+}
+
+rerun <- FALSE
+```
+
+## Read in sample keys
+
+```{r}
+tissue_files <- list.files(here::here("data/QTLs/Nov_2020/input/"), pattern = "sample_key.txt", full.names = TRUE) 
+tissue_names <- gsub("_sample_key.txt", "", basename(tissue_files))
+tissue_keys <- tissue_files %>%
+  map(read_tsv, col_types = "cc" )
+  
+tissue_n <- map_dbl(tissue_keys, nrow )
+
+tissue_metadata <- tibble( tissue = tissue_names, n = tissue_n)
+
+```
+
+## Read in significance data
+
+First, how does altering PEER factors change the number of eGenes?
+
+```{r fig.width = 8, fig.height = 6}
+sig_res <- list.files(here::here("data/QTLs/Nov_2020/results/normal_qtls"), pattern = "cis_qtl.txt.gz", full.names = TRUE)
+
+sig_res_out <- here::here("data/QTLs/Nov_2020/results/normal_qtls/all_tissues_sig_results.RData")
+
+if (rerun){
+  sig_res_files <- map(sig_res, ~{read_tsv(.x) %>% filter(qval < 0.05)  })
+  save(sig_res_files,file = sig_res_out)
+}else{
+  load(sig_res_out)
+}
+
+sig_res_n <- map_dbl(sig_res_files, nrow )
+
+# for sQTL results grouped by cluster
+sig_res_n_gene <- map_dbl(sig_res_files, ~{ 
+  if("group_id" %in% names(.x) ){ 
+    .x$gene <- str_split_fixed(.x$group_id, ":", 2)[,1]
+    length(unique(.x$gene) ) 
+    }else{
+      return(nrow(.x))
+    } })
+
+sig_res_info <- gsub(".cis_qtl.txt.gz", "", basename(sig_res))
+
+sig_res_df <- 
+  stringr::str_split_fixed(sig_res_info, pattern = "_", n = 4) %>%
+  as.data.frame( stringsAsFactors = FALSE ) %>%
+  rename(tissue = V1, type = V2, n_peer = V3, group = V4) %>%
+  mutate(group = ifelse(group == "", "gene", group)) %>% 
+  tidyr::unite( col = "type", c(type, group)) %>%
+  mutate(n_peer = as.numeric(gsub("peer", "", n_peer)) ) %>%
+  mutate(n_QTL = sig_res_n) %>%
+  mutate(file = basename(sig_res) ) %>%
+  mutate(n_genes = sig_res_n_gene)
+
+names(sig_res_files) <- sig_res_df$file
+
+to_plot <- sig_res_df %>%
+  left_join( tissue_metadata, by = "tissue") %>%
+  filter(type %in% c("expression_gene", "splicing_cluster"))
+
+size_order <- arrange(tissue_metadata, desc(n)) %>% pull(tissue)
+
+max_n_per_dataset <- 
+  to_plot %>%
+  split( paste(.$tissue, .$type) ) %>%
+  map_df( ~{ .x %>% arrange(desc(n_genes)) %>% head(1) })
+
+max_n_per_dataset_plot <- 
+  max_n_per_dataset %>%
+  mutate(tissue = forcats::fct_relevel(tissue, size_order)) %>%
+  ggplot(aes( x = n, y =n_genes, colour = tissue )) + 
+  geom_point() + 
+  geom_text_repel(aes(label = tissue)) +
+  xlab("Number of individuals") +
+  ylab("Number of genes with associations") +
+  scale_y_log10()+
+  theme_jh() + 
+  facet_wrap(~type) +
+  guides(colour = FALSE)
+
+max_n_per_dataset_plot
+
+max_n_per_dataset %>%
+  mutate(type = ifelse(type == "expression_gene", "eGenes", "sGenes")) %>%
+  select(tissue, type,  n, n_genes ) %>%
+  pivot_wider(names_from = type, values_from = n_genes) %>%
+  mutate(tissue = snakecase::to_any_case(tissue, case = "title", sep_out = " ") ) %>%
+  gt()
+
+
+n_per_PEER_plot <-
+  to_plot %>%
+  mutate(tissue = forcats::fct_relevel(tissue, size_order)) %>%
+  mutate(type = ifelse(type == "expression_gene", "eQTL", "sQTL")) %>%
+  ggplot(aes( y = n_genes, x = n_peer, group = tissue)) + 
+  geom_point(aes(colour = tissue)) +
+  geom_line(aes(colour = tissue), show.legend=FALSE) +
+  geom_text(aes(label = n_genes), nudge_y = 0.025, show.legend=FALSE, size = 3 ) +
+  scale_y_log10()+
+  theme_jh() +
+  #geom_text_repel(aes(x = 30, label = tissue)) +
+  xlab("Number of PEER factors") +
+  ylab("Number of QTLs") +
+  facet_wrap(~type) +
+  theme(legend.position = "bottom") +
+  scale_colour_brewer(type = "qual")
+
+n_per_PEER_plot
+
+ggsave(plot = n_per_PEER_plot, file = here::here("ALS_SC/plots/QTL_PEER_plot.pdf"), width =7, height = 5)
+
+```
+
+PEER factors:
+30 for Cervical and Lumbar expression
+10 for Thoracic expression
+15 for Cervical splicing
+10 for Lumbar splicing
+5 for Thoracic splicing
+
+```{r}
+names(sig_res_files)
+max_eqtl_files <- max_n_per_dataset%>% filter(type == "expression_gene") %>% pull(file)
+max_sqtl_files <- max_n_per_dataset%>% filter(type == "splicing_cluster") %>% pull(file)
+
+## total number of eGenes
+total_eGenes <- sig_res_files[max_eqtl_files] %>% map( "group_id" ) %>% unlist() %>% unique() %>% length()
+
+## total number of sGenes
+total_sGenes <- sig_res_files[max_sqtl_files] %>% map( ~{.x %>% mutate(gene = str_split_fixed(group_id, ":", 2)[,1]) %>% pull(gene) } ) %>% unlist() %>% unique() %>% length()
+
+
+print(total_eGenes)
+print(total_sGenes)
+```
+
+
+
+## Tissue Sharing
+
+Computed with qvalue comparing nominal P-values in target tissue with permutation P-values of source tissue
+```{r fig.width = 6, fig.height = 2.2}
+#qvalues <- read_tsv(here::here("data/QTLs/April_2020_tensorQTL/results/qvalue/NYGC_eQTL_all_pi0.tsv"))
+eqtl_qvalues <- read_tsv(here::here("data/QTLs/Nov_2020/results/qvalue/SC_eQTL_all_qvalues_merged.0.05.tsv"))
+
+eqtl_qvalues$type <- "eQTL"
+
+sqtl_qvalues <- read_tsv(here::here("data/QTLs/Nov_2020/results/qvalue/SC_sQTL_all_qvalues_merged.0.05.tsv"))
+
+sqtl_qvalues$type <- "sQTL"
+
+qvalues <- bind_rows(eqtl_qvalues, sqtl_qvalues) 
+
+conversion_df <- 
+  tibble(
+  long = unique(c(qvalues$source_name, qvalues$target_name)),
+  short = c("GTEx\nCSC", "CSC", "LSC", "TSC","GTEx\nCSC", "CSC", "LSC", "TSC" )
+  )
+
+qvalues$source_name <- conversion_df$short[match(qvalues$source_name, conversion_df$long)]
+qvalues$target_name <- conversion_df$short[match(qvalues$target_name, conversion_df$long)]
+
+tissue_levels <- c("CSC", "TSC", "LSC", "GTEx\nCSC")
+
+
+qvalues_to_plot <-
+  qvalues %>%
+  mutate(source_name = factor(source_name, levels = rev(tissue_levels) ), 
+  target_name = factor(target_name, levels = tissue_levels) ) %>%
+  mutate(pi1 = ifelse(is.na(pi1), yes = 1, no = pi1)) %>%
+  mutate(pi1 = ifelse(source_name == target_name, 1, pi1)) %>%
+  mutate(pi1 = signif(pi1, digits = 2)) 
+
+qvalue_plot <- 
+  qvalues_to_plot %>%
+  ggplot(aes(x= source_name, y = target_name, fill = pi1, label = pi1)) + 
+  geom_tile() + 
+  geom_text(colour = "white",fontface = "bold", size = 3) +
+  labs(x = "Discovery", y = "Replication") +
+  scale_fill_gradient(expression(pi[1]), 
+                      low = "lightgoldenrod1", 
+                      high = "red3", 
+                      limits = c(0.5,1), 
+                      breaks = c(0.5,1)  
+                      ) +
+  #theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip() +
+  scale_x_discrete(expand = c(0,0)) + scale_y_discrete( expand = c(0,0)) +
+  facet_wrap(~type, scales = "free") +
+  theme_jh() +
+  theme(axis.line = element_blank() ) +
+  guides(fill = guide_colourbar(barheight = unit(0.75, "in"), barwidth = unit(0.2, "in"),
+                                nbin = 10,title.theme = element_text(size = 10), ticks.colour = NA) ) 
+
+
+qvalue_plot
+
+ggsave(plot = qvalue_plot, file = here::here("ALS_SC/plots/ALS_SC_qvalue_plot.pdf" ), width = 5, height = 2.2)
+
+
+```
+
+```{r fig.width = 8, fig.height = 7}
+# qvalues_GTEX %>%
+#   ggplot(aes(x= source_name, y = target_name, fill = pi1, label = pi1)) + geom_tile() + geom_text() +
+#   labs(x = "", y = "") +
+#   scale_fill_distiller(expression(pi[1]), type = "div", palette = "RdYlBu", limits = c(0.5,1) ) +
+#   #theme_classic() +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+#   coord_flip() +
+#   scale_x_discrete(expand = c(0,0)) + scale_y_discrete( expand = c(0,0), position = "right") + 
+#   geom_hline(yintercept = 3.5, colour = "white", size = 3) +
+#   theme_jh()
+```
+

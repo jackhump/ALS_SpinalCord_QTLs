@@ -18,6 +18,8 @@ Jack Humphrey 2019-2022
 
 [Processed gene expression count matrices with de-identified metadata - Zenodo](https://zenodo.org/record/6385747) 
 
+[An HTML vignette on downloading the count data from Zenodo and performing differential expression](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/DE_Vignette.html)
+
 Whole genome sequencing data - dbGAP (in progress). 
 
 [Full summary statistics for expression and splicing QTLs - Zenodo](https://zenodo.org/record/5248758).

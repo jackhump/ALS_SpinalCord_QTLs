@@ -29,7 +29,7 @@ Whole genome sequencing data - dbGAP (in progress).
 
 Most workbooks are presented as raw .Rmd (in `scripts/` and knitted HTML files (in `html/`).
 
-## Data QC and setup
+### Data QC and setup
 
 [RNA-seq QC](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_covariates_setup.html)
 
@@ -37,7 +37,7 @@ WGS QC pipeline hosted [here](https://github.com/jackhump/WGS-QC-Pipeline)
 
 [Building sets of marker genes](https://github.com/jackhump/ALS_SpinalCord_QTLs/blob/master/scripts/ALS_marker_lists.Rmd)
  
-## Differential expression
+### Differential expression
 
 [Running differential expression](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_differential_expression.html)
 
@@ -45,11 +45,11 @@ WGS QC pipeline hosted [here](https://github.com/jackhump/WGS-QC-Pipeline)
 
 [Cell-type deconvolution](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_deconvolution.html)
 
-## Co-expression networks
+### Co-expression networks
 
 [Building co-expression networks, associations with traits and GO](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_WGCNA.html)
 
-## Quantitative Trait Loci (QTLs)
+### Quantitative Trait Loci (QTLs)
 
 [QTL results per region and sharing with GTEx](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_QTL_results.html)
 
@@ -57,7 +57,7 @@ WGS QC pipeline hosted [here](https://github.com/jackhump/WGS-QC-Pipeline)
 
 [Transcriptome-wide association study - TWAS](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_TWAS.html)
 
-## Gene prioritisation
+### Gene prioritisation
 
 [C9orf72 and ATXN3](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ATXN3_C9orf72.html)
 

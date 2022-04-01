@@ -1,8 +1,31 @@
 ## ALS Spinal Cord differential expression and molecular QTLs
 
-Jack Humphrey 2019-2021
+Jack Humphrey 2019-2022
 
-All Rmarkdown workbooks written for the project.
+## Manuscript
+
+[Link to preprint on medrxiv](https://www.medrxiv.org/content/10.1101/2021.08.31.21262682v1)
+
+## Shiny App
+
+[Launch Shiny app](https://jackhumphrey.shinyapps.io/als_spinal_cord_browser/)
+
+[source code](https://github.com/jackhump/ALS_SpinalCord_QTLs/blob/master/als_spinal_cord_browser/app.R)
+
+## Data Availability
+
+[Raw RNA-seq data - Gene Expression Omnibus](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE137810)
+
+[Processed gene expression count matrices with de-identified metadata - Zenodo](https://zenodo.org/record/6385747) 
+
+Whole genome sequencing data - dbGAP (in progress). 
+
+[Full summary statistics for expression and splicing QTLs - Zenodo](https://zenodo.org/record/5248758).
+
+[All TWAS weight files - Zenodo](https://zenodo.org/record/5256613)
+
+
+## Rmarkdown workbooks written for the project.
 
 Most workbooks are presented as raw .Rmd (in `scripts/` and knitted HTML files (in `html/`).
 

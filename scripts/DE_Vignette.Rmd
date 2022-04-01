@@ -1,0 +1,181 @@
+---
+title: "Differential Expression Vignette"
+author: "Jack Humphrey"
+date: "01/04/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(zen4R)
+library(tidyverse)
+library(limma)
+library(edgeR)
+library(gt)
+#remotes::install_github("eblondel/zen4R")
+
+```
+
+
+Here we show how to replicate our differential expression (DE) results using the data uploaded to Zenodo.
+
+
+```{r zenodo, cache=TRUE, message=FALSE }
+
+# find record
+zenodo <- ZenodoManager$new(logger = "INFO")
+rec <- zenodo$getRecordById("6385747")
+files <- rec$listFiles(pretty = TRUE)
+
+## download files
+infolder <- "download_zenodo/"
+dir.create(infolder, showWarnings = FALSE)
+if(!all(files$filename %in% list.files(infolder))){
+  rec$downloadFiles(path = infolder)
+}
+
+```
+
+
+Each spinal cord region has a separate tar.gz archive. Today we will work with the Cervical spinal cord region.
+
+We have to first unzip the archive:
+
+
+```{r unzip, cache=TRUE}
+# unzip the Cervical Spinal Cord
+
+tissue <- "Cervical_Spinal_Cord"
+
+system( paste0("cd ", infolder,"; tar -xzf ", paste0(tissue, ".tar.gz" ) ))
+list.files(file.path(infolder,tissue) )
+
+```
+
+
+Now we can read in the data
+
+
+```{r reading, cache=TRUE, message=FALSE}
+ 
+counts_file <- file.path(infolder, tissue, paste0(tissue, "_gene_counts.tsv.gz") )
+tpm_file <- file.path(infolder, tissue, paste0(tissue, "_gene_tpm.tsv.gz") )
+metadata_file <- file.path(infolder, tissue, paste0(tissue, "_metadata.tsv.gz") )
+
+gene_meta <- read_tsv("download_zenodo/gencode.v30.gene_meta.tsv.gz")
+
+support_loc <- read_tsv(metadata_file) %>% as.data.frame()
+tpm_loc <- read_tsv(tpm_file)
+counts_loc <- read_tsv(counts_file)
+
+row.names(support_loc) <- support_loc$rna_id
+
+genes_loc <- counts_loc %>% select(-gene_name) %>% 
+  column_to_rownames("ensembl_id")
+tpm_loc <- tpm_loc %>% select(-gene_name) %>% 
+  column_to_rownames("ensembl_id")
+```
+
+
+```{r}
+support_loc %>% group_by(disease) %>% tally() %>% gt::gt()
+```
+
+
+We use a liberal cut-off for lowly expressed genes (median TPM  > 0) in order to capture genes originating from lowly abundant cell-types, such as motor neurons.
+
+
+```{r filtering, cache=TRUE}
+keep.exp <- rowSums(tpm_loc > 0) >= ceiling(0.5 * ncol(genes_loc)) 
+
+genes_loc <- genes_loc[keep.exp, row.names(support_loc)]
+
+print(nrow(genes_loc))
+
+```
+
+
+We perform variable selection for our linear model.
+
+
+```{r modelling, cache=TRUE, message=FALSE, warning=FALSE}
+support_loc$rin_squared <- support_loc$rin^2
+support_loc$age_squared <- support_loc$age_rounded^2
+
+cols <- c("sex", "site_id", "disease", "library_prep")
+support_loc <- support_loc %>% mutate_at(cols, funs(factor(.)))
+support_loc$disease <- factor(support_loc$disease, levels = c("Control", "ALS"))
+
+support_loc$age_squared <- support_loc$age_rounded^2
+
+design_formula <- as.formula("~ disease + sex + rin + rin_squared + age_rounded + age_squared + library_prep + site_id + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + pct_mrna_bases")
+
+design_loc <- model.matrix(design_formula, data = support_loc)
+  
+stopifnot( nrow(support_loc) == nrow(design_loc))
+```
+
+
+We now perform differential expression using Limma Voom
+
+
+```{r run-limma, cache=TRUE}
+norm_loc <- calcNormFactors(genes_loc, method = "TMM") 
+
+dge <- DGEList(counts=genes_loc, samples=support_loc, norm.factors = norm_loc)  
+
+v <- voom(dge, design_loc)
+vfit <- lmFit(v, design_loc)
+efit <- eBayes(vfit)
+
+res <- 
+    topTable(efit, coef=2, number = Inf, adjust.method = "BH") %>% 
+      as.data.frame() %>%
+      rownames_to_column(var = "geneid") %>%
+      left_join(gene_meta, by = "geneid") %>%
+      janitor::clean_names() %>%
+      as_tibble() %>%
+  select(genename, geneid, everything() ) %>%
+  arrange(adj_p_val)
+
+table(res$adj_p_val < 0.05)
+table(res$adj_p_val < 0.05 & abs(res$log_fc) > 1)
+```
+
+
+We have identified thousands of differentially expressed genes. What are the top associations by P-value?
+
+
+```{r de-results, cache=TRUE}
+head(res, 10) %>% gt::gt()
+```
+
+
+We can plot the results as a volcano plot.
+
+
+```{r volcano, cache=TRUE}
+highlight <- c("CCL18", "CHIT1", "GPNMB", "MNX1", "MOBP")
+
+res %>%
+  mutate(case = case_when(
+  adj_p_val < 0.05 & log_fc >= 1 ~ "A",
+  adj_p_val < 0.05 & log_fc <1 & log_fc >0 ~ "B",
+  adj_p_val < 0.05 & log_fc < -1 ~ "C",
+  adj_p_val < 0.05 & log_fc > -1 & log_fc < 0 ~ "D",
+  TRUE ~ "E"
+  )) %>%
+  mutate(label = ifelse(genename %in% highlight, genename, "" )) %>%
+  ggplot(aes(x = log_fc, y = -log10(p_value))) + 
+  geom_point(aes(colour = case), size = 0.8) +
+  ggrepel::geom_text_repel(aes(label = label), max.overlaps = Inf ) +
+  scale_colour_manual(values = c( "red", "salmon", "navy", "dodgerblue3", "gray" )) +
+  theme_bw() + 
+  theme(axis.text = element_text(colour = "black")) +
+  guides(colour = "none") +
+  labs(y = expression(-log[10]~P), x = expression(log[2]~fold~change), title = "Cervical Spinal Cord", subtitle = "ALS vs Control" )
+  
+
+```
+

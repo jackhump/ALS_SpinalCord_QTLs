@@ -173,7 +173,13 @@ pre code {
 
 
 <p>Here we show how to replicate our differential expression (DE) results using the data uploaded to Zenodo.</p>
-<pre class="r"><code># find record
+<pre class="r"><code>library(zen4R) #remotes::install_github(&quot;eblondel/zen4R&quot;)
+library(tidyverse)
+library(limma)
+library(edgeR)
+library(gt)
+
+# find record
 zenodo &lt;- ZenodoManager$new(logger = &quot;INFO&quot;)
 rec &lt;- zenodo$getRecordById(&quot;6385747&quot;)</code></pre>
 <pre><code>## [zen4R][INFO] ZenodoRequest - Fetching https://zenodo.org/api/records?q=recid:6385747&amp;size=10&amp;page=1&amp;all_versions=1 
@@ -188,6 +194,19 @@ dir.create(infolder, showWarnings = FALSE)
 if(!all(files$filename %in% list.files(infolder))){
   rec$downloadFiles(path = infolder)
 }</code></pre>
+<pre><code>## [zen4R][INFO] ZenodoRecord - Download in sequential mode 
+## [zen4R][INFO] ZenodoRecord - Will download 4 files from record &#39;6385747&#39; (doi: &#39;10.5281/zenodo.6385747&#39;) - total size: 35.7 MiB 
+## [zen4R][INFO] Downloading file &#39;Cervical_Spinal_Cord.tar.gz&#39; - size: 15.8 MiB
+## [zen4R][INFO] Downloading file &#39;gencode.v30.gene_meta.tsv.gz&#39; - size: 441.9 KiB
+## [zen4R][INFO] Downloading file &#39;Lumbar_Spinal_Cord.tar.gz&#39; - size: 14.2 MiB
+## [zen4R][INFO] Downloading file &#39;Thoracic_Spinal_Cord.tar.gz&#39; - size: 5.4 MiB
+## [zen4R][INFO] Files downloaded at &#39;/Volumes/GoogleDrive/My Drive/Work/Mount_Sinai/NYGC_ALS/docs/download_zenodo&#39;.
+## [zen4R][INFO] ZenodoRecord - Verifying file integrity... 
+## [zen4R][INFO] File &#39;Cervical_Spinal_Cord.tar.gz&#39;: integrity verified (md5sum: ef2509aa14b14a539f30a93e31a8626c)
+## [zen4R][INFO] File &#39;gencode.v30.gene_meta.tsv.gz&#39;: integrity verified (md5sum: d9f5386bb6a20a8761b06619feb20cab)
+## [zen4R][INFO] File &#39;Lumbar_Spinal_Cord.tar.gz&#39;: integrity verified (md5sum: 4eb7b9be356230c36e31ca987e10f912)
+## [zen4R][INFO] File &#39;Thoracic_Spinal_Cord.tar.gz&#39;: integrity verified (md5sum: 8fa6a81bad47eff1de9d411be0c563ca)
+## [zen4R][INFO] ZenodoRecord - End of download</code></pre>
 <p>Each spinal cord region has a separate tar.gz archive. Today we will work with the Cervical spinal cord region.</p>
 <p>We have to first unzip the archive:</p>
 <pre class="r"><code># unzip the Cervical Spinal Cord

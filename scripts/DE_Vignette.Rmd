@@ -8,13 +8,6 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
-library(zen4R)
-library(tidyverse)
-library(limma)
-library(edgeR)
-library(gt)
-#remotes::install_github("eblondel/zen4R")
-
 ```
 
 
@@ -22,6 +15,12 @@ Here we show how to replicate our differential expression (DE) results using the
 
 
 ```{r zenodo, cache=TRUE, message=FALSE }
+
+library(zen4R) #remotes::install_github("eblondel/zen4R")
+library(tidyverse)
+library(limma)
+library(edgeR)
+library(gt)
 
 # find record
 zenodo <- ZenodoManager$new(logger = "INFO")

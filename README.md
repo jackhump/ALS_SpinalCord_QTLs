@@ -2,6 +2,8 @@
 
 Jack Humphrey 2019-2022
 
+![deg figure](https://github.com/jackhump/ALS_SpinalCord_QTLs/raw/master/deg_figure.png)
+
 ## Manuscript
 
 [Link to preprint on medrxiv](https://www.medrxiv.org/content/10.1101/2021.08.31.21262682v1)

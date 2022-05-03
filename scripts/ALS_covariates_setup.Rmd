@@ -212,16 +212,16 @@ For each tissue, get together all covariates , plus gene expression for those sa
 
 ```{r}
 load(here::here("data/feb_2020/gene_counts_no_tags.RData") )
-
+load(here::here("data/feb_2020/gene_tpm_no_tags.RData") )
 dim(genes_counts)
-
+dim(genes_tpm)
 #support <- filter(rna_metadata, tissue %in% tissues)
-
+rerun <- TRUE
 
 for( t in tissues){
   support_loc <- filter(support, tissue == t ) %>% distinct() # any sneaky duplicate rows?
   counts_loc <- genes_counts[, support_loc$sample] 
-  tpm_loc <- genes_counts[, support_loc$sample]
+  tpm_loc <- genes_tpm[, support_loc$sample]
   tech_loc <- filter(rna_tech_df, sample %in% support_loc$sample)
   outFile <- here::here(paste0("data/differential_expression/ALS/", t, ".RData") )
   if( rerun){

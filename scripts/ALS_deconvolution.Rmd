@@ -18,6 +18,8 @@ output:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 library(patchwork)
+library(UpSetR)
+
 # remotes::install_github("oganm/markerGeneProfile")
 # remotes::install_github('youngjaewoo/DDSClassifier')
 # https://github.com/ellispatrick/CortexCellDeconv
@@ -88,7 +90,10 @@ Don't apply any normalising or scaling
 
 ```{r expression, echo=TRUE}
 
+deconvolution_input_file <- here::here("data/deconvolution/input_expression.RData")
+if(rerun){
 load(here::here("data/feb_2020/gene_counts_no_tags.RData") )
+load(here::here("data/feb_2020/gene_tpm_no_tags.RData") )
 
 metadata <- read_tsv( here::here("data/differential_expression/ALS/ALS_all_differential_expression_support.tsv") )
 
@@ -111,8 +116,11 @@ genes_loc <- as.data.frame(genes_counts[, metadata$sample])
 
 # remove lowly expressed genes
 keep.exp <- rowSums(cpm(genes_loc) > 1) >= ceiling(0.5*ncol(genes_loc))
-genes_loc <- genes_loc[keep.exp,]
 
+
+
+genes_loc <- genes_loc[keep.exp,]
+print(nrow(genes_loc))
 # QN is bad!
 #genes_loc <-  EDASeq::betweenLaneNormalization(as.matrix(genes_loc),which = "full")
 
@@ -134,7 +142,10 @@ geneExpr_our$symbol = NULL
 
 #head(geneExpr_our)
 
-rm(genes_loc)
+save(geneExpr_our, file = deconvolution_input_file)
+}else{
+load(deconvolution_input_file)
+}
 # row scaling is bad!
 #geneResid_our = geneExpr_our - rowMeans(geneExpr_our)
 ```
@@ -227,7 +238,8 @@ createMarkers <- function( input, n_markers = 10){
 darmanis_fit <- compareReferenceCells(bulk_expression = geneExpr_our, reference_expression = Darmanis, reference_meta = DarmanisCells)
 
 darmanis_markers <- createMarkers(darmanis_fit, n_markers = 100)
-
+#darmanis <- darmanis_markers$markers
+#save(darmanis, file = here::here("data/markers/Darmanis_single_cell.RData"))
 ```
 
 Created set of Darmanis marker genes (100 per cell with highest fold change >0) and total genes.
@@ -376,7 +388,48 @@ DSA prefers small numbers of markers so take top 10
 #   left_join(metadata, by = "sample")
 ```
 
-## Mathys et al Human Brain - MuSiC
+## Mathys et al Human Brain 
+
+## dtangle
+
+Use markers created by Rahat from the Mathys cell types
+
+Also need the d_mean object, the mean expression in each cell type, to add.
+
+```{r}
+load("data/deconvolution/Mathys_markers.RData")
+load("data/deconvolution/Mathys_d_mean.RData")
+sce <- d_mean #DarmanisMean #d_mean 
+ge <- geneExpr_our
+commongenes <- intersect (rownames(ge), rownames(sce))
+ge <- ge[pmatch(commongenes, rownames(ge)), ]
+sce <- sce[pmatch(commongenes, rownames(sce)), ]
+y <- cbind(sce, ge)
+y <- DGEList(counts= y)
+y <- calcNormFactors(y,method = 'TMM', Acutoff =  quantile(log2(Darmanis[,1]/sum(Darmanis[,1])),0.75))
+y <- cpm(y, log=FALSE)
+y <- normalizeQuantiles(y)
+pure_samples = as.list(1:8)
+names(pure_samples) = colnames(y)[1:8]
+markers = lapply(Mathys_markers$markers,intersect,rownames(y))
+dtMathys <- dtangle(log2(t(y)), pure_samples=pure_samples, markers = markers[names(pure_samples)])$estimates
+
+dtMathys_m <- melt(dtMathys)
+colnames(dtMathys_m) <- c("sample", "cell", "deconv")
+#head(dtMathys_m)
+dtMathys_m$sample <- as.factor(dtMathys_m$sample)
+metadata_dtangle_Mathys <- merge(dtMathys_m, metadata, by.x = "sample", by.y = "sample") # Both tables are in the same order 
+
+mathys_dtangle_res <- metadata_dtangle_Mathys
+
+
+
+```
+
+
+
+
+### MuSiC
  
 ### Create markers
  
@@ -593,7 +646,8 @@ dim(mathys_music_res)
 
 ```
 
-Comparison between methods and reference sets
+
+# Comparison between methods and reference sets
 
 
 
@@ -625,39 +679,51 @@ residualiser <- function(data){
 
 ```{r fig.width = 8, fig.height = 5}
 #darmanis_dsa_resid <- darmanis_dsa_res %>% filter(sample != "CGND-HRA-00431.1" ) %>% split(paste(.$tissue, .$cell) ) %>% map_df( residualiser)
-
+if(rerun){
 darmanis_dtangle_resid <- darmanis_dtangle_res %>% filter(sample != "CGND-HRA-00431.1" ) %>% split(paste(.$tissue, .$cell) ) %>% map_df( residualiser)
 
 darmanis_music_resid <- darmanis_music_res %>% filter(sample != "CGND-HRA-00431.1" ) %>% split(paste(.$tissue, .$cell) ) %>% map_df( residualiser)
 
 mathys_music_resid <- mathys_music_res %>% filter(sample != "CGND-HRA-00431.1" ) %>% split(paste(.$tissue, .$cell) ) %>% map_df( residualiser)
 
-#write_tsv(darmanis_dsa_resid, path = here::here("data/deconvolution/Darmanis_DSA_residual_results.tsv") )
-write_tsv(darmanis_music_resid, path = here::here("data/deconvolution/Darmanis_MuSiC_residual_results.tsv") )
-write_tsv(darmanis_dtangle_resid, path = here::here("data/deconvolution/Darmanis_dtangle_residual_results.tsv") )
-write_tsv(mathys_music_resid, path = here::here("data/deconvolution/Mathys_MuSiC_residual_results.tsv") )
+mathys_dtangle_resid <- mathys_dtangle_res %>% filter(sample != "CGND-HRA-00431.1" ) %>% split(paste(.$tissue, .$cell) ) %>% map_df( residualiser)
+
+
+#write_tsv(darmanis_dsa_resid, file = here::here("data/deconvolution/Darmanis_DSA_residual_results.tsv") )
+write_tsv(darmanis_music_resid, file = here::here("data/deconvolution/Darmanis_MuSiC_residual_results.tsv") )
+write_tsv(darmanis_dtangle_resid, file = here::here("data/deconvolution/Darmanis_dtangle_residual_results.tsv") )
+write_tsv(mathys_music_resid, file = here::here("data/deconvolution/Mathys_MuSiC_residual_results.tsv") )
+write_tsv(mathys_dtangle_resid, file = here::here("data/deconvolution/Mathys_dtangle_residual_results.tsv") )
+}else{
 
 darmanis_music_resid <- read_tsv(here::here("data/deconvolution/Darmanis_MuSiC_residual_results.tsv") )
 darmanis_dtangle_resid <- read_tsv( here::here("data/deconvolution/Darmanis_dtangle_residual_results.tsv") )
 mathys_music_resid <- read_tsv(here::here("data/deconvolution/Mathys_MuSiC_residual_results.tsv"))
+mathys_dtangle_resid  <- read_tsv(here::here("data/deconvolution/Mathys_dtangle_residual_results.tsv"))
 
+}
 ## write out MuSiC estimates with Mathys cells for supplementary table
 mathys_music_df <-
   mathys_music_resid %>%
   dplyr::select(sample, cell, deconv) %>%
   pivot_wider(names_from = cell, values_from = deconv)
 
-write_csv(mathys_music_df, file = "../../ALS_SC/tables/mathys_music_deconvolution_table.csv")
+write_csv(mathys_music_df, file = here::here("ALS_SC/tables/mathys_music_deconvolution_table.csv"))
+
 
 
 ```
 
 
+## Plotting
+
 ```{r fig.width = 7, fig.height = 3}
 
-estimate_plot <- function(results, method, reference = "Darmanis", ycol = "deconv", p = "p_nom", 
-                          tissues = c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord", "Thoracic_Spinal_Cord") 
-                          ){
+estimate_plot <- function(
+  results, p_df, method, reference = "Darmanis", ycol = "deconv", p = "p_nom", 
+  tissues = c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord", "Thoracic_Spinal_Cord")  
+  ){
+  
   to_plot <- results %>%
     mutate(tissue = factor(tissue, levels = tissues)) %>%
     filter(tissue %in% tissues) %>%
@@ -665,17 +731,6 @@ estimate_plot <- function(results, method, reference = "Darmanis", ycol = "decon
     mutate( disease = forcats::fct_relevel(disease,"Control")) %>%
     mutate(tissue = factor( gsub("_","\n", tissue), levels = gsub("_","\n", tissues) )  ) %>%
     filter( !is.na(cell))
-  
-  p_df <- to_plot %>% 
-    group_by(cell, tissue) %>% 
-    summarise(p_nom = min(p_nom), p_resid = min(p_resid)) %>%
-    mutate(padj = p.adjust(p_resid, method = "bonferroni")) %>%
-    mutate(padj_label = case_when(
-    padj < 0.0001 ~ "***",
-    padj < 0.001 ~ "**",
-    padj < 0.05 ~ "*",
-    TRUE ~ "."
-    ))
   
   plot <- 
   to_plot %>%
@@ -705,12 +760,13 @@ estimate_plot <- function(results, method, reference = "Darmanis", ycol = "decon
     scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0,1)) + 
     geom_text(nudge_x = 0.5, data = p_df, aes(x = 1, y = 0.9, label = padj_label)   )
   
-  
   return(plot)
 }
 
 conversion_table <- data.frame(short = c("Ast","End", "Mic", "Ex", "Oli", "Per" ),
-                               long = c("Astrocytes", "Endothelial", "Microglia", "Neurons", "Oligos", "Pericytes")
+                               long = c("astrocytes", "endothelial", "microglia", "neurons", "oligodendrocytes", "pericytes"),
+                               mono = c("A","E","M","N","O","P"),
+                               title = c("Astrocytes", "Endothelial", "Microglia", "Neurons", "Oligos", "Pericytes")
   )
 
 mathys_music_df <- mathys_music_resid %>%
@@ -719,39 +775,191 @@ mathys_music_df <- mathys_music_resid %>%
   rename(cell = long) %>%
   select(sample, disease, duration, cell, tissue, deconv, resid, p_nom, p_resid)
 
+mathys_dtangle_df <- mathys_dtangle_resid %>%
+  left_join(conversion_table, by = c("cell" = "short") ) %>%
+  select(-cell) %>%
+  rename(cell = long) %>%
+  select(sample, disease, duration, cell, tissue, deconv, resid, p_nom, p_resid)
 
+# each tool / reference comparison needs Bonferroni adjusting of the P-values
+get_bonf_res <- function(data){
+  data %>% select(cell, tissue, p_nom, p_resid) %>%
+    distinct() %>%
+    drop_na() %>%
+    mutate(tissue = gsub("_","\n", tissue) )  %>% 
+    mutate(q_nom = p.adjust(p_nom, method = "bonferroni"),
+           q_resid = p.adjust(p_resid, method = "bonferroni")
+           ) %>%
+    mutate(padj_label = case_when(
+    q_resid < 0.0001 ~ "***",
+    q_resid < 0.001 ~ "**",
+    q_resid < 0.05 ~ "*",
+    TRUE ~ "."
+    ))
+}
 
-mathys_music_csc <- estimate_plot(mathys_music_df, method = "MuSiC", reference = "Mathys single nucleus", tissues = c("Cervical_Spinal_Cord"))
+mathys_music_q <- get_bonf_res(mathys_music_df)
+mathys_dtangle_q <- get_bonf_res(mathys_dtangle_df)
+
+darmanis_music_q <- get_bonf_res(darmanis_music_resid)
+darmanis_dtangle_q <- get_bonf_res(darmanis_dtangle_resid)
+
+# plot estimates
+
+mathys_music_csc <- estimate_plot(mathys_music_df, mathys_music_q, method = "MuSiC", reference = "Mathys single nucleus", tissues = c("Cervical_Spinal_Cord"))
 
 mathys_music_csc
 
-## for main text - plot Cervical Spinal Cord with Mathys MuSiC
-ggsave(plot = mathys_music_csc, filename = here::here("ALS_SC/plots/mathys_music_deconvolution_plot.pdf"), width = 8, height = 2.5)
+
 
 ```
 
+Main figure - show Cervical Spinal Cord with MuSiC estimates
+
+```{r}
+
+main_plot_q <- mathys_music_q %>% left_join(conversion_table, by = c("cell" = "long")) %>%
+  filter(tissue == "Cervical\nSpinal\nCord")
+
+main_csc_plot <- 
+  mathys_music_df %>%
+  left_join(conversion_table, by = c("cell" = "long") ) %>%
+  drop_na() %>%
+  filter(tissue == "Cervical_Spinal_Cord") %>%
+  mutate(disease = factor(disease, levels = c("Control", "ALS"))) %>%
+  mutate(disease_group = ifelse(disease == "Control", "A", "B")) %>%
+  mutate(box_group = paste(disease_group,title ) ) %>%
+  ggplot(aes(x = title, deconv)) +
+    rasterise(
+      geom_point(aes(colour = disease),
+                 size = 0.5, 
+                 position = position_jitterdodge(dodge.width = 0.8, 
+                                                 jitter.width = 0.5, jitter.height = 0) ),
+      dpi = 300)+
+    geom_boxplot(aes(group = box_group), 
+                 colour = "black", fill = NA,notch = FALSE, na.rm = TRUE, outlier.color = NA, 
+                 position = position_dodge(width = 0.8)
+                 #, 
+                 #width = 0.5
+                 ) +
+    scale_colour_manual(name = "", values = c("#4F8FC4", "#B61927")) +
+    labs(x = "", y = "" ) +
+    guides(fill = FALSE) +
+    theme_jh() +
+    theme(
+      axis.ticks = element_line(colour = "black"),
+      legend.position = "top",
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
+      plot.title = element_blank(),
+      #strip.background = element_blank(),
+      #strip.switch.pad.grid = unit(0,units ="pt"),
+      #panel.spacing.x = unit(0,units = "pt"), 
+      #strip.placement = "outside",
+      panel.border = element_blank(),
+      #strip.text.x = element_text(hjust = 0.5, vjust = 1, margin = margin(t =5, b = 5, unit = "pt")),
+      #strip.text.y.left = element_text(angle = 0),
+      #plot.margin = margin()
+    ) +
+    labs(y = "") +
+    geom_text( 
+              data = main_plot_q, 
+              aes(x = title , y = 0.85, label = padj_label)   ) +
+  scale_y_continuous(name = "Estimated proportion", labels = scales::percent_format(accuracy = 1), limits = c(0,0.87)) 
+
+main_csc_plot
+
+ggsave(plot = main_csc_plot, filename = here::here("ALS_SC/plots/main_figure_mathys_music_csc_deconvolution_plot.pdf"), width = 3.5, height = 2.75)
+
+
+
+```
+
+
+
+## Plot all MuSiC estimates - for supplement
+
 ```{r fig.height = 12, fig.width = 8}
-estimate_multiplot <- 
+music_multiplot <- 
   estimate_plot(mathys_music_df, method = "MuSiC", reference = "Mathys single nucleus") +
-
   estimate_plot(darmanis_music_resid, method = "MuSiC", reference = "Darmanis single cell") +
-
     plot_layout(ncol = 1) +
   plot_annotation(tag_levels = "A") &
   theme(plot.tag = element_text(face = "bold"))
 
-ggsave(plot = estimate_multiplot, filename =  here::here("ALS_SC/plots/deconvolution_music_plots.pdf"), width = 8, height = 9)
+ggsave(plot = music_multiplot, filename =  here::here("ALS_SC/plots/deconvolution_music_plots.pdf"), width = 8, height = 9)
+ggsave(plot = music_multiplot, filename =  here::here("ALS_SC/plots/deconvolution_music_plots.png"), width = 8, height = 9, dpi = 600)
 
-estimate_multiplot
+music_multiplot
 ```
 
+
+## All dtangle estimates 
+
 ```{r fig.height = 4.5, fig.width = 8}
-dtangle_plot <- estimate_plot(darmanis_dtangle_resid, method = "dtangle", reference = "Darmanis single cell") +
-  theme(plot.margin = margin(t = 5,b=5,l=5,r =5, unit = "pt"))
+dtangle_multiplot <- 
+  estimate_plot(mathys_dtangle_df, method = "dtangle", reference = "Mathys single nucleus") +
+    estimate_plot(darmanis_dtangle_resid, method = "dtangle", reference = "Darmanis single cell") +
+  theme(plot.margin = margin(t = 5,b=5,l=5,r =5, unit = "pt")) +
+  plot_layout(ncol = 1) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(face = "bold"))
 
-ggsave(plot = dtangle_plot, filename =  here::here("ALS_SC/plots/deconvolution_dtangle_plot.pdf"), width = 8, height = 6)
+dtangle_multiplot
+ggsave(plot = dtangle_multiplot, filename =  here::here("ALS_SC/plots/deconvolution_dtangle_plots.pdf"), width = 8, height = 9)
+ggsave(plot = dtangle_multiplot, filename =  here::here("ALS_SC/plots/deconvolution_dtangle_plots.png"), width = 8, height = 9, dpi = 600)
 
-dtangle_plot 
+```
+
+
+## NEW for Revisions - compare marker gene lists between Darmanis and Mathys
+
+Finish!
+
+```{r}
+darmanis_mathys_conversion <- data.frame(
+  mathys = c("Ast", "End", "Ex", "In", "Mic", "Oli", "Opc", "Per"),
+  darmanis = c("astrocytes", "endothelial", "neurons", NA, "microglia", "oligodendrocytes", NA, NA)
+)
+
+
+
+d_mark <- darmanis_markers$markers
+m_mark <- Mathys_markers$markers
+names(m_mark) <- darmanis_mathys_conversion$darmanis[ match(names(m_mark), darmanis_mathys_conversion$mathys)]
+
+m_mark <- m_mark[ !is.na(names(m_mark))]
+
+#names(d_mark) <- paste0("d_", names(d_mark) )
+#names(m_mark) <- paste0("m_", names(m_mark))
+#all_mark <- c(d_mark, m_mark) 
+
+#upset(fromList( all_mark  ), nsets = length(all_mark))
+
+upset(fromList( d_mark  ), nsets = length(d_mark))
+upset(fromList( m_mark  ), nsets = length(m_mark))
+
+#jaccard_intersect <- function(x,y){ length(intersect(x,y) ) / length(unique(c(x,y))) }
+
+#jaccard_intersect(d_mark$d_astrocytes, m_mark$m_astrocytes)
+
+#mark_expand <- crossing(Var1 = names(d_mark), Var2 = names(m_mark) )
+
+mark_jac_res <- map2_df(names(d_mark),names(d_mark), ~{
+    int <- length(intersect(d_mark[[.x]], m_mark[[.y]]) ) 
+    uni <- length(unique(c(d_mark[[.x]], m_mark[[.y]]) ) ) 
+
+    jac <- int / uni
+    
+    tibble(x = .x, y = .y, int = int, uni = uni, jac = jac)
+  })
+
+mark_jac_res %>%
+  mutate(jac = ifelse(jac == 1, NA, jac)) %>%
+  ggplot(aes(x, y, fill = jac)) + geom_tile() + geom_text(aes(label = int) )
+
+mark_jac_res
+  
+
 ```
 
 
@@ -761,16 +969,16 @@ calculate correlation between the estimate of neuronal, astrocyte and microglial
 
 ```{r fig.width = 8, fig.height = 5}
 compare_2_results <- function(res1, res2, res1.name, res2.name){
-  conversion_table <- data.frame(short = c("astro","endo", "microglia", "neuro", "oligo" ),
-                               long = c("astrocytes", "endothelial", "microglia", "neurons", "oligodendrocytes")
-  )
-  # match ids
-  if( all(res1$cell %in% conversion_table$short) ){
-    res1$cell <- conversion_table$long[ match(res1$cell, conversion_table$short)]
-  }
-  if( all(res2$cell %in% conversion_table$short) ){
-    res2$cell <- conversion_table$long[ match(res2$cell, conversion_table$short)]
-  }
+  # conversion_table <- data.frame(short = c("astro","endo", "microglia", "neuro", "oligo" ),
+  #                              long = c("astrocytes", "endothelial", "microglia", "neurons", "oligodendrocytes")
+  # )
+  # # match ids
+  # if( any(res1$cell %in% conversion_table$short) ){
+  #   res1$cell <- conversion_table$long[ match(res1$cell, conversion_table$short)]
+  # }
+  # if( all(res2$cell %in% conversion_table$short) ){
+  #   res2$cell <- conversion_table$long[ match(res2$cell, conversion_table$short)]
+  # }
   
   left_join(
   x = dplyr::select(res1, sample, cell, deconv),
@@ -781,40 +989,45 @@ compare_2_results <- function(res1, res2, res1.name, res2.name){
   left_join(metadata, by = "sample") %>%
     mutate(tissue = gsub("_", "\n", tissue)) %>%
     filter(!is.na(tissue)) %>%
+    filter(!is.na(cell)) %>%
     #filter(tissue %in% c("Lumbar_Spinal_Cord", "Cervical_Spinal_Cord")) %>%
   ggplot(aes(x = deconv.res1, y = deconv.res2 ) ) + 
     geom_point( size = 0.5, aes(colour = disease), alpha = 0.5) +
     geom_abline(slope =1 , intercept =0, linetype = 3) +
     labs(x = res1.name, y = res2.name)+
     theme_jh() +
-    facet_grid(tissue ~ cell,switch = "y", scales = "free" ) +
-    ggpubr::stat_cor(method = "spearman",aes(label = ..r.label..) ) +
+    facet_grid(tissue ~ cell,switch = "y") + #, scales = "free" ) +
+    ggpubr::stat_cor(method = "spearman",aes(label = ..r.label..), size = 3  ) +
     scale_colour_manual(values = c("red", "darkblue")) +
     theme(
       #plot.title = element_blank(),
       strip.background = element_blank(),
       strip.switch.pad.grid = unit(0,units ="pt"),
-      panel.spacing.x = unit(0,units = "pt"), 
+      panel.spacing.x = unit(10,units = "pt"), 
+      panel.spacing.y = unit(10,units = "pt"), 
       strip.placement = "outside",
       panel.border = element_blank(),
       strip.text.x = element_text(face = "bold", hjust = 0.5, vjust = 1, margin = margin(t =5, b = 5, unit = "pt")),
       strip.text.y.left = element_text(angle = 0),
     ) +
-    scale_y_continuous(labels = scales::percent_format(accuracy = 1) ) +
-    scale_x_continuous(labels = scales::percent_format(accuracy = 1) )
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1),n.breaks = 3, breaks = waiver() ) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1),n.breaks = 3, breaks = waiver() ) 
 }
 
 
-#compare_2_results(darmanis_dtangle_res, darmanis_dsa_res, "dtangle", "DSA") + labs(title = "Darmanis - DSA vs dtangle") +
 darmanis_compare_plot <- 
-  compare_2_results(darmanis_music_res, darmanis_dtangle_res, "MuSiC", "dtangle") + labs(title = "Darmanis - MuSiC vs dtangle", x = "MuSiC estimate", y = "dtangle estimate") #+
+  compare_2_results(res1 = darmanis_music_res, res2 = darmanis_dtangle_res, "MuSiC", "dtangle") + labs(title = "Darmanis - MuSiC vs dtangle", x = "MuSiC estimate", y = "dtangle estimate") #+
+
+mathys_compare_plot <- 
+  compare_2_results(mathys_music_df, mathys_dtangle_df, "MuSiC", "dtangle") + labs(title = "Mathys - MuSiC vs dtangle", x = "MuSiC estimate", y = "dtangle estimate") #+
 
 
-ggsave(plot = darmanis_compare_plot, filename =  here::here("ALS_SC/plots/deconvolution_darmanis_compare_plot.pdf"), width = 9, height = 6)
-#compare_2_results(darmanis_music_res, darmanis_dsa_res, "MuSiC", "DSA")+ labs(title = "Darmanis - MuSiC vs DSA") +
- # plot_layout(nrow = 3)
+reference_compare_plot <- mathys_compare_plot + darmanis_compare_plot + plot_layout(ncol = 1)
 
-darmanis_compare_plot
+ggsave(plot = reference_compare_plot, filename =  here::here("ALS_SC/plots/deconvolution_reference_compare_plot.pdf"), width = 10, height = 8)
+
+
+
 ```
 
 Endothelial cells have worst agreement between MuSiC and the two marker based methods dtangle and DSA. 
@@ -831,11 +1044,11 @@ darmanis_mathys_conversion <- data.frame(
 
 mathys_compare <- mathys_music_res %>% dplyr::select(sample, cell, deconv)
 mathys_compare$cell_mathys <- mathys_compare$cell
+
 mathys_compare$cell <- darmanis_mathys_conversion$darmanis[match(mathys_compare$cell, darmanis_mathys_conversion$mathys)]
 
 
-
-reference_compare_plot <-
+music_reference_compare_plot <-
   left_join(mathys_compare, 
             dplyr::select(darmanis_music_res, sample, cell, deconv), by = c("sample", "cell"), 
             suffix = c(".mathys", ".darmanis")) %>%
@@ -843,272 +1056,209 @@ reference_compare_plot <-
   mutate(tissue = gsub("_", "\n", tissue )) %>%
   #filter(tissue %in% c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord")) %>%
   filter(cell_mathys %in% c("Ast", "End", "Ex", "Mic", "Oli")) %>%
-  ggplot(aes(y = deconv.mathys, x = deconv.darmanis)) + 
+  ggplot(aes(x = deconv.mathys, y = deconv.darmanis)) + 
     geom_point( size = 0.5, aes(colour = disease), alpha = 0.5) +
     geom_abline(slope =1 , intercept =0, linetype = 3) +
     #labs(x = res1.name, y = res2.name)+
     theme_jh() +
-    facet_grid(tissue ~ cell,switch = "y", scales = "free" ) +
-    ggpubr::stat_cor(method = "spearman",aes(label = ..r.label..) ) +
+    facet_grid(tissue ~ cell,switch = "y") + #, scales = "free" ) +
+    ggpubr::stat_cor(method = "spearman",aes(label = ..r.label..), size = 3 ) +
     scale_colour_manual(values = c("red", "darkblue")) +
     theme(
       strip.background = element_blank(),
       strip.switch.pad.grid = unit(0,units ="pt"),
-      panel.spacing.x = unit(0,units = "pt"), 
+      panel.spacing.x = unit(10,units = "pt"), 
+      panel.spacing.y = unit(10,units = "pt"), 
       strip.placement = "outside",
       panel.border = element_blank(),
       strip.text.x = element_text(face = "bold", hjust = 0.5, vjust = 1, margin = margin(t =5, b = 5, unit = "pt")),
       strip.text.y.left = element_text(angle = 0),
+      axis.text = element_text(size = 8)
     ) +
-    scale_y_continuous(labels = scales::percent_format(accuracy = 1) ) +
-    scale_x_continuous(labels = scales::percent_format(accuracy = 1) ) +
-  labs(x = "MuSiC estimate with Mathys", y = "MuSiC estimate with Darmanis")
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1),n.breaks = 3, breaks = waiver() ) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1),n.breaks = 3, breaks = waiver() ) +
+  labs(x = "MuSiC estimate with Mathys", y = "MuSiC estimate with Darmanis", title = "MuSiC - Mathys vs Darmanis")
 
-ggsave(plot = reference_compare_plot, filename =  here::here("ALS_SC/plots/deconvolution_reference_compare_plot.pdf"), width = 9, height = 6)
+#ggsave(plot = music_reference_compare_plot, filename =  here::here("ALS_SC/plots/deconvolution_music_reference_compare_plot.pdf"), width = 10, height = 6)
 
-reference_compare_plot
+
+music_reference_compare_plot
+
+## compare dtangle between references
+
+mathys_compare <- mathys_dtangle_res %>% dplyr::select(sample, cell, deconv)
+mathys_compare$cell_mathys <- mathys_compare$cell
+
+mathys_compare$cell <- darmanis_mathys_conversion$darmanis[match(mathys_compare$cell, darmanis_mathys_conversion$mathys)]
+
+
+dtangle_reference_compare_plot <-
+  left_join(mathys_compare, 
+            dplyr::select(darmanis_dtangle_res, sample, cell, deconv), by = c("sample", "cell"), 
+            suffix = c(".mathys", ".darmanis")) %>%
+  left_join(metadata, by = "sample") %>%
+  mutate(tissue = gsub("_", "\n", tissue )) %>%
+  #filter(tissue %in% c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord")) %>%
+  filter(cell_mathys %in% c("Ast", "End", "Ex", "Mic", "Oli")) %>%
+  ggplot(aes(x = deconv.mathys, y = deconv.darmanis)) + 
+    geom_point( size = 0.5, aes(colour = disease), alpha = 0.5) +
+    geom_abline(slope =1 , intercept =0, linetype = 3) +
+    #labs(x = res1.name, y = res2.name)+
+    theme_jh() +
+    facet_grid(tissue ~ cell,switch = "y" ) +
+    ggpubr::stat_cor(method = "spearman",aes(label = ..r.label..), size = 3 ) +
+    scale_colour_manual(values = c("red", "darkblue")) +
+    theme(
+      strip.background = element_blank(),
+      strip.switch.pad.grid = unit(0,units ="pt"),
+      panel.spacing.x = unit(15,units = "pt"), 
+      panel.spacing.y = unit(10,units = "pt"), 
+      strip.placement = "outside",
+      panel.border = element_blank(),
+      strip.text.x = element_text(face = "bold", hjust = 0.5, vjust = 1, margin = margin(t =5, b = 5, unit = "pt")),
+      strip.text.y.left = element_text(angle = 0),
+      axis.text = element_text(size = 8)
+    ) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1),n.breaks = 3, breaks = waiver() ) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1),n.breaks = 3, breaks = waiver() ) +
+  labs(x = "dtangle estimate with Mathys", y = "dtangle estimate with Darmanis", title = "dtangle - Mathys vs Darmanis")
+
+
+tool_compare_plot <- music_reference_compare_plot +
+dtangle_reference_compare_plot + plot_layout(ncol = 1)
+
+
+ggsave(plot = tool_compare_plot, filename =  here::here("ALS_SC/plots/deconvolution_tool_reference_compare_plot.pdf"), width = 10, height = 8)
+
+
+
 ```
 
-
-<!-- 18000 single cells -->
-<!-- Majority are neurons, with astrocytes oligodendrocytes, endothelial cells, meninges/Schwann cell mixed population. -->
-<!-- Neurons are subclustered into ventral and dorsal populations (D and V). Each side is separated into excitatory and inhibitory (DE, DI, VE,VI). -->
-<!-- Cholinergic neurons in the ventral horn are termed VC, there are 307. These are putative motor neurons! -->
-<!-- How many categories should I try to deconvolute? Stick to basic cell types? Try to separate excitatory, inhibitory and cholinergic? -->
-
-<!-- ```{r} -->
-<!-- if( !file.exists(here::here("data/Mouse_SpinalCord_scRNA/GSE103892_CNS_cells_human_gene_ids.RData") ) ){ -->
-
-<!--   msc_counts <- read_tsv(here::here("data/Mouse_SpinalCord_scRNA/GSE103892_Expression_Count_Matrix.txt.gz" ))  -->
-
-<!--   msc_meta <- read_tsv(here::here("data/Mouse_SpinalCord_scRNA/GSE103892_Sample_Cell_Cluster_Information.txt.gz")) %>% -->
-<!--     janitor::clean_names() %>% -->
-<!--     separate(col = "sample_cellbarcode", into = c("sample", "barcode"), sep = "_", remove = FALSE) -->
-
-<!--   msc_meta <- -->
-<!--     msc_meta %>%  -->
-<!--     mutate( -->
-<!--       cell_category = case_when(  -->
-<!--         cell_type %in% c("astrocytes", "meninges/schwann", "endo/vascular", "microglia", "Oligos") ~ cell_type, -->
-<!--         grepl("DI|VI", cell_type) ~ "neuron_inhib", -->
-<!--         grepl("DE|VE", cell_type) ~ "neuron_excit", -->
-<!--         grepl("VC", cell_type) ~ "neuron_chol" -->
-<!--       ) -->
-<!--     ) -->
-
-<!--   msc_meta <- filter(msc_meta, !is.na(cell_category)) %>% -->
-<!--     dplyr::select(cellID = sample_cellbarcode, cellType = cell_category, sampleID = sample ) -->
-
-<!--   msc_counts_matrix <- msc_counts %>% as.data.frame() -->
-<!--   row.names(msc_counts_matrix) <- msc_counts_matrix$Gene -->
-<!--   msc_counts_matrix$Gene <- NULL -->
-
-<!--   msc_counts_matrix <- msc_counts_matrix[, msc_meta$cellID] -->
-
-<!--   # lift over genes from mouse to human -->
-<!--   human_genes_homologene <- homologene( row.names(msc_counts_matrix), inTax = 10090, outTax = 9606 ) -->
-
-<!--   # remove any duplicate gene entries - homologene sometimes finds more than one match, take first in list for simplicity -->
-<!--   human_genes_homologene <- human_genes_homologene[ !duplicated(human_genes_homologene$`10090`),] -->
-<!--   human_genes_homologene <- human_genes_homologene[ !duplicated(human_genes_homologene$`9606`),] -->
-<!--   # only 15535 out of 32962 genes matched -->
-<!--   #library(gProfileR) -->
-<!--   #human_genes_gconvert <- gconvert(query = row.names(msc_counts_matrix), organism = "mmusculus", target = "ENSG") -->
-<!--   msc_counts_matrix_human <- msc_counts_matrix[ human_genes_homologene$`10090`,] -->
-<!--   row.names(msc_counts_matrix_human) <- human_genes_homologene$`9606` -->
-<!--   dim(msc_counts_matrix_human) -->
-
-<!--   save(msc_counts_matrix_human, msc_meta, file = here::here("data/Mouse_SpinalCord_scRNA/GSE103892_CNS_cells_human_gene_ids.RData" )) -->
-<!-- } -->
-<!-- load(here::here("data/Mouse_SpinalCord_scRNA/GSE103892_CNS_cells_human_gene_ids.RData" )) -->
-
-<!-- ``` -->
-
-
-<!-- ## Mouse spinal cord - MuSiC -->
-
-<!-- ```{r , message = FALSE, warn = FALSE, echo = FALSE, fig.width = 12, fig.height = 12 } -->
-
-<!-- msc_music_res_file <- here::here("data/deconvolution/NYGC_Rosenberg_MuSiC_deconv.RData") -->
-
-<!-- if( !file.exists(msc_music_res_file) ){ -->
-
-<!-- # T is bulk; C is reference -->
-<!-- bulk <- geneExpr_our -->
-<!-- reference <- msc_counts_matrix_human -->
-<!-- reference_meta <- as.data.frame(msc_meta, stringsAsFactors = FALSE) -->
-
-<!-- sample_column = grep("[S-s]ample|[S-s]ubject",colnames(reference_meta)) -->
-<!-- colnames(reference_meta)[sample_column] = "SubjectName" -->
-<!-- rownames(reference_meta) = reference_meta$cellID -->
-
-<!-- C.eset <- Biobase::ExpressionSet(assayData = as.matrix(reference),phenoData = Biobase::AnnotatedDataFrame(reference_meta)) -->
-
-<!-- T.eset <- Biobase::ExpressionSet(assayData = as.matrix(bulk)) -->
-
-<!-- library(MuSiC) -->
-<!-- require(xbioc) -->
-<!-- RESULTS = t(music_prop(bulk.eset = T.eset, sc.eset = C.eset, clusters = 'cellType', -->
-<!--                                             markers = NULL, normalize = FALSE, samples = 'SubjectName',  -->
-<!--                                             verbose = TRUE)$Est.prop.weighted) -->
-
-<!-- msc_music_res <- t(RESULTS) %>% -->
-<!--   as.data.frame() %>% -->
-<!--   rownames_to_column(var = "sample") %>% -->
-<!--   tidyr::gather(key = "cell", value = "deconv", -sample) %>% -->
-<!--   left_join(metadata, by = "sample") -->
-
-<!-- save(msc_music_res, file = msc_music_res_file) -->
-<!-- }else{ -->
-<!--   load(msc_music_res_file) -->
-<!-- } -->
-
-
-<!-- dim(msc_music_res) -->
-
-<!-- #estimate_plot(msc_music_res, method = "MuSiC", reference = "Mouse spinal cord single cell") -->
-
-<!-- ``` -->
-
-
-<!-- ## Darmanis vs Rosenberg - Mouse single cell -->
-
-<!-- ```{r fig.width = 12, fig.height = 8} -->
-<!-- #msc_music_res -->
-
-<!-- cell_type_conversion <- data.frame( -->
-<!--   rosenberg = c("astrocytes", "endo/vascular", "neuron_excit", "neuron_inhib", "microglia", "Oligos", NA, "meninges/schwann", "neuron_chol"), -->
-<!--   mathys = c("Ast", "End", "Ex", "In", "Mic", "Oli", "Opc", "Per", "Ex"), -->
-<!--   darmanis = c("astrocytes", "endothelial", "neurons", "neurons", "microglia", "oligodendrocytes", NA, NA, "neurons"), stringsAsFactors = FALSE -->
-<!-- ) -->
-
-<!-- rosenberg_join <- msc_music_res %>% dplyr::select(sample, rosenberg = cell, deconv) %>% left_join(cell_type_conversion) -->
-<!-- darmanis_join <- darmanis_music_res %>% dplyr::select(sample, darmanis = cell, deconv) %>% left_join(cell_type_conversion) -->
-<!-- mathys_join <- mathys_music_res %>% dplyr::select(sample, mathys = cell, deconv) %>% left_join(cell_type_conversion) -->
-
-<!-- compare_two_references <- function(res1, res2, name1, name2){ -->
-<!--     names(res1)[ names(res1) == "deconv" ] <- name1 -->
-<!--     names(res2)[ names(res2) == "deconv" ] <- name2 -->
-
-<!--     to_plot <-  -->
-<!--       inner_join(res1,res2, by = c("sample","mathys", "rosenberg", "darmanis")) %>% -->
-<!--       left_join(metadata, by = "sample") %>% -->
-<!--       filter(tissue %in% c("Frontal_Cortex", "Cerebellum", "Cervical_Spinal_Cord")) %>% -->
-<!--       filter(complete.cases(.))  -->
-<!--     #to_plot$cell <- paste0(to_plot[[name1]], "/", to_plot[[name2]]) -->
-<!--     if(!"Darmanis" %in% c(name1, name2)){to_plot$darmanis <- ""} -->
-<!--     if(!"Rosenberg" %in% c(name1, name2)){to_plot$rosenberg <- ""} -->
-<!--     if(!"Mathys" %in% c(name1, name2)){to_plot$mathys <- ""} -->
-
-<!--     #return(to_plot) -->
-
-<!--     to_plot %>% -->
-<!--       mutate(cell = paste(darmanis, rosenberg, mathys, sep = ", ")) %>% -->
-<!--     ggplot(aes_string(x = name1, y = name2, group = "tissue", colour = "tissue")) +  -->
-<!--     geom_point(size = 1, alpha = 0.5, aes(colour = tissue) ) +  -->
-<!--     facet_wrap( ~cell, scales = "free" ) +  -->
-<!--     geom_abline(slope = 1, intercept = 0, linetype = 3) + -->
-<!--     theme_jh() + -->
-<!--       ggpubr::stat_cor(method = "spearman")  -->
-
-<!-- } -->
-
-<!-- compare_two_references(rosenberg_join, darmanis_join, name1 = "Rosenberg", name2 = "Darmanis") -->
-<!-- compare_two_references(rosenberg_join, mathys_join, name1 = "Rosenberg", name2 = "Mathys") -->
-<!-- compare_two_references(darmanis_join, mathys_join, name1 = "Darmanis", name2 = "Mathys") -->
-
-
-<!-- left_join(mathys_compare, dplyr::select(darmanis_music_res, sample, cell, deconv), by = c("sample", "cell"), suffix = c(".mathys", ".darmanis")) %>% -->
-<!--   left_join(metadata, by = "sample") %>% -->
-<!--   filter(tissue %in% c("Frontal_Cortex", "Cerebellum", "Cervical_Spinal_Cord")) %>% -->
-<!--   filter(cell_mathys %in% c("Ast", "End", "Ex", "In", "Mic", "Oli")) %>% -->
-<!--   ggplot(aes(x = deconv.mathys, y = deconv.darmanis)) +  -->
-<!--   geom_point(size = 1, alpha = 0.5, aes(colour = tissue) ) +  -->
-<!--   facet_wrap( ~cell_mathys, scales = "free" ) +  -->
-<!--   geom_abline(slope = 1, intercept = 0, linetype = 3) + -->
-<!--   labs(x = "MuSiC predictions with Mathys reference", y = "MuSiC predictions with Darmanis reference") +theme_jh() -->
-
-
-<!-- ``` -->
+Compare lumbar and cervical spinal cord estimates for shared donors
 
 ```{r}
 
-# 
-# # intersect our data with Darmanis, calculate marker genes
-# int <- intersect(rownames(geneExpr_our),rownames(Darmanis))
-# 
-# int <- rownames(Darmanis)
-# 
-# y <- DGEList(counts= Darmanis[int,])
-# y <- calcNormFactors(y,method = 'TMM', Acutoff =  quantile(log2(Darmanis[,1]/sum(Darmanis[,1])),0.75))
-# Darmanis <- cpm(y, log=FALSE)
-# DarmanisMean = sapply(unique(DarmanisCells),function(x)rowMeans(Darmanis[,names(which(DarmanisCells==x))]))
-# int <- intersect(rownames(geneExpr_our),rownames(DarmanisMean))
-# 
-# int <- rownames(DarmanisMean)
-# 
-# design <- model.matrix(~.-1,data.frame(cell= DarmanisCells[colnames(Darmanis)]))
-# colnames(design) <- gsub('cell','',colnames(design))
-# v <- voom(Darmanis[int,rownames(design)], design, plot=FALSE)
-# fit <- lmFit(v, design)
-# x <- sapply(colnames(design),function(x)paste(x,'-(',paste(colnames(design)[colnames(design)!=x],collapse = "+"),')/4',sep = ''))
-# con = makeContrasts(contrasts = x,levels = colnames(design))
-# fit = contrasts.fit(fit,con)
-# fit <- eBayes(fit, robust=TRUE)
-# 
-# 
-# DarmanisMarkers = NULL
-# 
-# n_markers <- 20
-# 
-# for(i in 1:ncol(design)){
-#   x = fit$coef[p.adjust(fit$p.v[,i],'fdr')<0.05,i]
-#   DarmanisMarkers[[colnames(design)[i]]] =  names(head(sort(-x[x>0]),n_markers))
-# }
-# unlist(lapply(DarmanisMarkers,length))
-# DarmanisMarkersFull = NULL
-# for(i in 1:ncol(design)){
-#   x = fit$coef[p.adjust(fit$p.v[,i],'fdr')<0.05,i]
-#   DarmanisMarkersFull[[colnames(design)[i]]] =  names(sort(-x[x>0]))
-# }
-# unlist(lapply(DarmanisMarkersFull,length))
-# 
-# # get microglial comparison 1 - vs mean of all
-# microglia_vs_all <- topTable(fit, coef = 3, number = Inf)  %>%
-#   as.data.frame() %>%
-#   rownames_to_column(var = "gene_name") %>%
-#   janitor::clean_names()
-# 
-# microglia_vs_all %>% 
-#   filter(adj_p_val < 0.05, log_fc > 2) %>%
-#   arrange( desc(log_fc))
-#   
-# # better comparison - microglia vs neurons
-# mg_neur <- filter(darmanis_metadata, cellType %in% c("neurons", "microglia")) %>%
-#   mutate(cellType = factor(cellType, levels = c("neurons", "microglia")))
-# row.names(mg_neur) <- mg_neur$cellID
-# 
-# design2 <- model.matrix(~ cellType,  mg_neur) #data.frame(cell= DarmanisCells[mg_neur$cellID]))
-# 
-# v <- voom(Darmanis[int,rownames(design2)], design2, plot=FALSE)
-# fit <- lmFit(v, design2)
-# 
-# #fit = contrasts.fit(fit,con)
-# 
-# fit <- eBayes(fit, robust=TRUE)
-# 
-# microglia_vs_neurons <- 
-#   topTable(fit, coef = 2, number = Inf) %>%
-#   as.data.frame() %>%
-#   rownames_to_column(var = "gene_name") %>%
-#   janitor::clean_names()
-# 
-# microglia_vs_neurons %>% 
-#   filter(adj_p_val < 0.05, log_fc > 2) %>%
-#   arrange( desc(log_fc)) 
-#   
-# write_tsv(microglia_vs_all, "../../other_datasets/Darmanis/Darmanis_microglia_vs_all_limma.tsv")
-# 
-# write_tsv(microglia_vs_neurons, "../../other_datasets/Darmanis/Darmanis_microglia_vs_neurons_limma.tsv")
+all_res <- 
+  bind_rows(
+mathys_music_df %>% mutate(ref = "Mathys", tool = "MuSiC" ),
+mathys_dtangle_df %>% mutate(ref = "Mathys", tool = "dtangle" ),
+darmanis_music_res %>% mutate(ref = "Darmanis", tool = "MuSiC" ),
+darmanis_dtangle_res %>% mutate(ref = "Darmanis", tool = "dtangle" )
+) %>%
+  mutate(donor = darmanis_music_res$donor[match(.$sample, darmanis_music_res$sample)]) %>%
+  select(sample,donor, disease, cell, tissue, deconv, ref, tool) %>%
+  drop_na() %>%
+  mutate(cell = ifelse(cell == "oligos", "oligodendrocytes", cell))
+
+all_res %>% pull(donor) %>% unique() %>% length()
+# 203 unique donors with both CSP and LSP
+
+
+## plot all four estimates as comparison
+ref_comparison_boxplot <- 
+  all_res %>%
+  mutate(tissue = gsub("_", " ", tissue)) %>%
+  ggplot(aes(y = deconv, x = cell)) +  
+  geom_boxplot(aes(fill = paste(ref,tool) ), position = position_dodge(), outlier.size = 1 ) + 
+  facet_wrap(~ tissue, ncol = 1) +
+  theme_classic() +
+  labs(fill = "", y = "Estimated proportion", x = "") +
+      theme(
+      strip.background = element_blank(),
+      strip.switch.pad.grid = unit(0,units ="pt"),
+      panel.spacing.x = unit(15,units = "pt"), 
+      panel.spacing.y = unit(5,units = "pt"), 
+      strip.placement = "inside",
+      panel.border = element_rect(fill = NA),
+      #panel.border = element_blank(),
+      strip.text.x = element_text(face = "bold", hjust = 0.5, vjust = 1, margin = margin(t =5, b = 5, unit = "pt"), size = 10),
+      strip.text.y.left = element_text(angle = 0),
+      axis.text = element_text(size = 10, colour = "black"),
+      axis.line.x.bottom = element_line(), 
+      legend.position = "top",
+    ) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1),n.breaks = 4, breaks = waiver(), limits = c(0,0.8) )
+
+ggsave(plot = ref_comparison_boxplot, filename =  here::here("ALS_SC/plots/deconvolution_reference_compare_boxplot.pdf"), width = 9, height = 7)
+
+ref_comparison_plot 
+```
+
+```{r}
+
+# compare spinal cord segments for shared donors
+sp_compare <- 
+  all_res %>%
+  filter(tissue != "Thoracic_Spinal_Cord") %>% #, ) %>%
+  select(donor, tissue, cell, deconv, tool, ref, disease) %>%
+  pivot_wider(names_from = tissue, values_from = deconv, values_fn = first )
+
+
+sp_compare %>%
+  drop_na() %>%
+  filter(ref == "mathys", tool == "dtangle" ) %>%
+  ggplot(aes(x = Cervical_Spinal_Cord, y = Lumbar_Spinal_Cord)) +
+  geom_point(aes(colour = disease)) +
+  facet_wrap(~cell, scales = "free") +
+  geom_abline(slope = 1, intercept = 0) +
+  theme_classic() +
+  ggpubr::stat_cor()
+
+
+```
+
+
+
+Correlate estimates between cell-types for cases and controls
+
+```{r}
+
+cell_levels = c("oligodendrocytes",  "neurons",  "astrocytes", "pericytes" , "endothelial",     "microglia" )
+
+make_cor_matrix <- function(data,  disease_, title_){
+  tissue_ <- "Cervical_Spinal_Cord"
+  cols <- colorRampPalette(brewer.pal(6,name="RdYlBu"))(72)
+  brks <- seq(-1,1,length.out=72)  
+  # fix ordering of cell types to cell levels
+  cell_types <- as.character(na.omit(unique(data$cell) ))
+  cell_types <- cell_levels[ cell_levels %in% cell_types] 
+  
+  data %>%
+    #drop_na() %>%
+    filter(tissue == tissue_, disease == disease_) %>%
+    select("sample", "cell", "deconv", "disease", "tissue") %>%
+    tidyr::pivot_wider(names_from=cell, values_from = deconv, values_fn = first ) %>%
+    select("sample", all_of(cell_types) ) %>%
+    column_to_rownames("sample") %>%
+    as.matrix() %>%
+    cor(method="pearson") %>%
+  pheatmap(treeheight_row=0, treeheight_col=0, border_color="black", color=rev(cols), breaks=brks, cluster_rows=FALSE, cluster_cols = FALSE, legend=FALSE, main=title_,display_numbers = TRUE,show_colnames = FALSE, fontsize = 8,fontsize_number = 9, number_color = "black" ) %>%
+    .[[4]]
+}
+
+make_cor_matrix(darmanis_music_res, disease_ = "Control", title_ = "Darmanis MuSiC - Control" )
+
+grob_list <- 
+list(
+make_cor_matrix(darmanis_music_res, "Control", title_ = "Darmanis MuSiC - Control" ),
+make_cor_matrix(darmanis_music_res, "ALS", title_ = "Darmanis MuSiC - ALS" ),
+make_cor_matrix(darmanis_dtangle_res, "Control", "Darmanis dtangle - Control" ),
+make_cor_matrix(darmanis_dtangle_res, "ALS", "Darmanis dtangle - ALS" ),
+make_cor_matrix(mathys_music_df, "Control", title_ = "Mathys MuSiC - Control" ),
+make_cor_matrix(mathys_music_df, "ALS", title_ = "Mathys MuSiC - ALS" ),
+make_cor_matrix(mathys_dtangle_df, "Control",  "Mathys dtangle - Control" ),
+make_cor_matrix(mathys_dtangle_df, "ALS", "Mathys dtangle - ALS" )
+)
+
+cor_plots <- patchwork::wrap_plots(grob_list, nrow = 4, heights = c(4,4,5,5)) 
+
+ggsave(plot = cor_plots, filename =  here::here("ALS_SC/plots/deconvolution_celltype_cor.pdf"), width = 8, height = 8)
+
+cor_plots
+
+darmanis_music_res %>% filter(tissue == "Cervical_Spinal_Cord") %>% select(sample,disease) %>% distinct() %>% group_by(disease) %>% tally()
+
+
+ # plot_layout(nrow = 2, heights = c(4,5))
 ```
 

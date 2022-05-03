@@ -86,117 +86,167 @@ Functions for DE
 
 ```{r}
 
-runDifferentialExpression <- function(t, design, quantile_norm = FALSE, coef_number = 2, subsetby = NULL, no_sinai = FALSE, return_matrix = FALSE){
-
-  inFile <- here::here( paste0("data/differential_expression/ALS/", t, ".RData"))
-  load(inFile)
+## wrapper function with all the various options deployed in paper
+runDifferentialExpression <- 
+  function(t, design, quantile_norm = FALSE, coef_number = 2, subsetby = NULL, no_sinai = FALSE, return_matrix = FALSE, downsample = NULL, min_TPM = 1, cache = FALSE, permutations = NULL, donor_list = NULL) {
+  # if cache == TRUE then assume support_loc, tech_loc, gene counts and tpm are already in environment
+  if(cache == FALSE | !exists("support_loc") ){
+    inFile <- here::here( paste0("data/differential_expression/ALS/", t, ".RData"))
+    load(inFile)
+  }
+  # this will break if support loc already present
+  meta_loc <- left_join(support_loc, tech_loc, by = "sample")
   
-  support_loc <- left_join(support_loc, tech_loc, by = "sample")
+  # restrict to specific set of donors
+  if( !is.null(donor_list)){
+    meta_loc <- filter(meta_loc, donor %in% donor_list)
+  }
   
   if(exists("deconv_res")){
-    support_loc <- left_join(support_loc, deconv_res, by = "sample")
+    meta_loc <- left_join(meta_loc, deconv_res, by = "sample")
   }
   
   if( no_sinai == TRUE){
-    support_loc <- filter(support_loc, site != "Mount Sinai")
+    meta_loc <- filter(meta_loc, site != "Mount Sinai")
   }
   
+  ## SUBSETS
   if(!is.null(subsetby)){
     stopifnot(subsetby %in% c("automatic", "manual", "motor_onset", "duration", "onset", "controls"))
     if( subsetby == "automatic"){
-      support_loc <- filter(support_loc, prep == "Automated KAPA Total")
-      #support_loc <- filter(support_loc, site %in% c("University College London", "Academic Medical Center") )
+      meta_loc <- filter(meta_loc, prep == "Automated KAPA Total")
+      #meta_loc <- filter(meta_loc, site %in% c("University College London", "Academic Medical Center") )
     }
     
     if(subsetby == "manual"){
-      support_loc <- filter(support_loc, prep == "Manual KAPA Total")
+      meta_loc <- filter(meta_loc, prep == "Manual KAPA Total")
     }
     
     if(subsetby == "motor_onset"){
-      support_loc <- filter(support_loc, disease == "ALS", motor_onset %in% c("Limb", "Bulbar"))
-      print(table(support_loc$motor_onset))
+      meta_loc <- filter(meta_loc, disease == "ALS", motor_onset %in% c("Limb", "Bulbar"))
+      print(table(meta_loc$motor_onset))
     }
     if(subsetby == "duration"){
-      support_loc <- filter(support_loc, disease == "ALS", !is.na(as.numeric(duration))) %>% 
+      meta_loc <- filter(meta_loc, disease == "ALS", !is.na(as.numeric(duration))) %>% 
         mutate(duration = as.numeric(duration))
-      #print(table(support_loc$duration))
+      #print(table(meta_loc$duration))
     }
     
     if(subsetby == "onset"){
-      support_loc <- filter(support_loc, disease == "ALS", !is.na(as.numeric(onset)))
-      #print(table(support_loc$onset))
+      meta_loc <- filter(meta_loc, disease == "ALS", !is.na(as.numeric(onset)))
+      #print(table(meta_loc$onset))
     }
     
     if(subsetby == "controls"){
-      support_loc <- filter(support_loc, disease == "Control", !is.na(as.numeric(age))) %>% mutate(age = as.numeric(age))
-      print(table(support_loc$age))
+      meta_loc <- filter(meta_loc, disease == "Control", !is.na(as.numeric(age))) %>% mutate(age = as.numeric(age))
+      print(table(meta_loc$age))
     }
   }
+  # DOWNSAMPLING
+  # max n is 174 (cervical) and 154 (lumbar)
+  if( !is.null(downsample)){
+    support_sample <- meta_loc[NULL,]
+    print( table(support_sample$disease) )
+    while( ! all(c("Control", "ALS") %in% support_sample$disease) ){
+      n <- sample(1:nrow(meta_loc), size = downsample, replace = FALSE )
+      support_sample <- meta_loc[n,]
+      message( "downsampling to ", downsample, " samples")
+      print( table(support_sample$disease) )
+    }
+    meta_loc <- support_sample
+  }
     
-  print(table(support_loc$disease))
-  print(table(support_loc$disease_c9))
+  print(table(meta_loc$disease))
+  print(table(meta_loc$disease_c9))
   
+  # factorise all categorical variables
   cols <- c("sex", "site", "disease", "prep", "motor_onset")
-  support_loc <- support_loc %>% mutate_at(cols, funs(factor(.)))
+  meta_loc <- meta_loc %>% mutate_at(cols, funs(factor(.)))
   
   # sort out disease comparisons
-  support_loc$disease <- factor(support_loc$disease, levels = c("Control", "ALS"))
-  support_loc$disease_c9 <- factor(support_loc$disease_c9, levels = c("Control", "C9ALS", "sALS"))
+  meta_loc$disease <- factor(meta_loc$disease, levels = c("Control", "ALS"))
+  meta_loc$disease_c9 <- factor(meta_loc$disease_c9, levels = c("Control", "C9ALS", "sALS"))
   
-  support_loc$disease_compare <- factor(support_loc$disease_c9, levels = c("sALS", "C9ALS"))
-  if( grepl("disease_compare", design) ){ support_loc <- filter(support_loc, !is.na(disease_compare))}
-  if( grepl("disease_c9", design) ){ support_loc <- filter(support_loc, !is.na(disease_c9))}
+  meta_loc$disease_compare <- factor(meta_loc$disease_c9, levels = c("sALS", "C9ALS"))
+  if( grepl("disease_compare", design) ){ meta_loc <- filter(meta_loc, !is.na(disease_compare))}
+  if( grepl("disease_c9", design) ){ meta_loc <- filter(meta_loc, !is.na(disease_c9))}
   
-  # squared components
-  support_loc$age_squared <- support_loc$age^2
-  support_loc$rin_squared <- support_loc$rin^2
+  # add squared components
+  meta_loc$age_squared <- meta_loc$age^2
+  meta_loc$rin_squared <- meta_loc$rin^2
 
   # if only 1 prep or site used then remove from formula
-  if( length(unique(support_loc$prep)) == 1){ design <- gsub("\\+ prep", "", design)}
-  if( length(unique(support_loc$site)) == 1){ design <- gsub("\\+ site", "", design)}
-  if( length(unique(support_loc$sex)) == 1){ design <- gsub("\\+ sex", "", design)}
+  if( length(unique(meta_loc$prep)) == 1){ design <- gsub("\\+ prep", "", design)}
+  if( length(unique(meta_loc$site)) == 1){ design <- gsub("\\+ site", "", design)}
+  if( length(unique(meta_loc$sex)) == 1){ design <- gsub("\\+ sex", "", design)}
   
+  # subset counts
+  genes_loc <- counts_loc[, meta_loc$sample]
+  tpm_loc <- tpm_loc[ , meta_loc$sample]
+  # remove low count genes
+  keep.exp <- rowSums(tpm_loc > min_TPM) >= ceiling(0.5 * ncol(genes_loc)) 
+  genes_loc <- genes_loc[keep.exp,]
+  print( paste0("testing ", nrow(genes_loc), " genes" ) )
   design_loc <- as.formula(design)
 
+  # quantile normalise counts
+  if( quantile_norm == TRUE){
+    genes_loc <-  EDASeq::betweenLaneNormalization(as.matrix(genes_loc),which = "full")
+  }
+  
+  # normalized counts with TMM
+  norm_loc <- calcNormFactors(genes_loc, method = "TMM") 
+  # make DGE object
+  dge <- DGEList(counts=genes_loc, samples=meta_loc, norm.factors = norm_loc)  
+  
   ## RUN LIMMA
-  de_res_limma <- 
-    differentialExpression(support_loc, counts_loc, design_formula = design_loc, qnorm = quantile_norm, return_matrix = return_matrix )
-  
-  if( return_matrix == TRUE){return(de_res_limma)}
-  
-  print(summary(decideTests(de_res_limma,adjust.method = "BH", p.value  = "0.05")))
-  limma_res <- extractResults(res = de_res_limma, coef.number = coef_number, method = "limma")
-  
-  return(limma_res)
+  if( is.null(permutations)){
+    de_res_limma <- 
+      differentialExpression(dge, meta_loc, design_loc, return_matrix = return_matrix )
+    
+    if( return_matrix == TRUE){return( de_res_limma) }
+    
+    print(summary(decideTests(de_res_limma,adjust.method = "BH", p.value  = "0.05")))
+    limma_res <- extractResults(res = de_res_limma, coef.number = coef_number, method = "limma")
+    
+    return(limma_res)
+  }else{
+  ## PERMUTATIONS 
+  # permute disease label
+  permutation_res <- map( 1:permutations, ~{
+    print(paste0(" * permutation: ", .x) )
+    support_perm <- meta_loc
+    support_perm$disease <- sample(support_perm$disease, replace = FALSE)
+
+    print(support_perm$disease)
+    #print(design_loc)
+    de_res <- differentialExpression(dge, support_perm, design_loc)
+    print(summary(decideTests(de_res,adjust.method = "BH", p.value  = "0.05")))
+    
+    de_res <- extractResults(res = de_res, coef.number = 2, method = "limma")
+    return(de_res)
+    
+  } )
+  names(permutation_res) <- paste0("perm_", 1:permutations)
+  return(permutation_res)
+  }
 }
 
+
+
+## ACTUALLY RUNNING DE
 differentialExpression <- function(
+  dge,
   support_loc, 
-  counts_loc, 
-  design_formula, 
-  qnorm = FALSE, 
-  gc_length = gc_length_df,
+  design_loc,
   return_matrix = FALSE
   ){
-  # subset counts
-  genes_loc <- counts_loc[, support_loc$sample]
-  # remove low count genes
-  keep.exp <- rowSums(cpm(genes_loc) > 1) >= ceiling(0.5 * ncol(genes_loc)) # important! CHIT1 is removed at 90%; CHAT at 0.5
-  genes_loc <- genes_loc[keep.exp,]
-  
-  design_loc <- model.matrix(design_formula, data = support_loc)
+
+  ## # put the above in wrapper function
+  design_loc <- model.matrix(design_loc, data = support_loc)
   
   stopifnot( nrow(support_loc) == nrow(design_loc))
   
-  # quantile normalise counts
-  if( qnorm == TRUE){
-    genes_loc <-  EDASeq::betweenLaneNormalization(as.matrix(genes_loc),which = "full")
-  }
-  # normalized counts with TMM
-  norm_loc <- calcNormFactors(genes_loc, method = "TMM") 
-
-  dge <- DGEList(counts=genes_loc, samples=support_loc, norm.factors = norm_loc)  
-
   v <- voom(dge, design_loc)
   vfit <- lmFit(v, design_loc)
   efit <- eBayes(vfit)
@@ -241,22 +291,57 @@ extractResults <- function(res, coef.number, method, shrink_method = "apeglm"){
   }
 }
 
-multi_tissue_de <- function(design, qnorm = FALSE, coef = 2, tissue_list = tissues, subsetby = NULL, no_sinai = FALSE, return_matrix = FALSE){
+multi_tissue_de <- function(
+  design, # diff expression design
+  qnorm = FALSE, # whether to quantile normalise beforehand
+  coef = 2, # which coefficient to test (1 is intercept)
+  tissue_list = tissues, # tissues to look at 
+  subsetby = NULL, # subset by sequencing platform
+  no_sinai = FALSE, # exclude Sinai controls
+  return_matrix = FALSE, # return counts instead of DE results
+  downsample = NULL, # whether to downsample each cohort
+  min_TPM = 1,
+  donor_list = NULL
+  ){
   de_list <- purrr::map( tissue_list, ~{
     print(.x)
-    res <- runDifferentialExpression(.x, design = design, quantile_norm = qnorm, coef_number = coef,subsetby = subsetby, no_sinai = no_sinai,  return_matrix = return_matrix)
+    res <- runDifferentialExpression(.x, design = design, quantile_norm = qnorm, coef_number = coef,subsetby = subsetby, no_sinai = no_sinai,  return_matrix = return_matrix, downsample = downsample, min_TPM = min_TPM, donor_list = donor_list)
     return(res)
   })
   names(de_list) <- tissue_list
   return(de_list)
 }
 
+
+
 de_summary <- function(res, sig = 0.05){
   map_df(res, ~{
-    .x %>%
-      group_by(n_sig = adj_p_val < sig) %>% tally() 
-  }, .id = "tissue") %>% filter(n_sig == TRUE) %>% select(-n_sig)
+    tibble(n = nrow(.x), n_sig = sum(.x$adj_p_val < sig), n_strong = sum(.x$adj_p_val < sig & abs(.x$log_fc) > 1) )
+  }, .id = "tissue")
 }
+
+
+de_cor <- function(res, type = "t", min_expr = -Inf, max_expr = Inf, min_p = 1, return_object = FALSE){
+  cor_res <- map2(res, names(res), ~{ 
+    df <- .x
+    df <- df[df$ave_expr > min_expr & df$ave_expr < max_expr & df$p_value < min_p,]
+    df <- df[, c("genename", type)] 
+    df <- df[ !duplicated(df$genename) & !is.na(df$genename),]
+    names(df)[2] <- .y
+    return(df)
+    }) %>%
+    reduce(full_join, by = "genename") %>%
+    column_to_rownames(var = "genename") 
+  if(return_object){
+    return(cor_res)
+  }
+
+  corrr::correlate(cor_res, method = "pearson", use = "pairwise.complete.obs") %>% 
+    corrr::stretch(remove.dups = TRUE, na.rm = TRUE) %>%
+    mutate(n = nrow(cor_res), min = min_expr, max = max_expr)
+  
+}
+
 
 ```
 
@@ -277,28 +362,39 @@ design1c  <- "~ disease + sex + prep + age + age_squared + gPC1 + gPC2 + gPC3 + 
 # all tech metrics plus site
 design1d  <- "~ disease + sex + prep + age + age_squared + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
 
+# reduced tech metrics with site and prep
+design1e <- "~ disease + sex + rin + rin_squared + age + age_squared + prep + site + pct_mrna_bases + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
+
 ```
 
 # Model 1 - full model with all technical covariates, no quantile normalisation
-
 
 ```{r}
 if(rerun){
   
   de_res_1a <- multi_tissue_de(design1a, qnorm = FALSE)
+  de_res_1a_0.01 <- multi_tissue_de(design1a, qnorm = FALSE, min_TPM = 0.01)
   de_res_1b <- multi_tissue_de(design1b, qnorm = FALSE)
   de_res_1c <- multi_tissue_de(design1c, qnorm = FALSE)
   de_res_1d <- multi_tissue_de(design1d, qnorm = FALSE)
+  de_res_1d_0.01 <- multi_tissue_de(design1d, qnorm = FALSE, min_TPM = 0.01)
+  de_res_1e <- multi_tissue_de(design1e, qnorm = FALSE)
+  de_res_1e_0.01 <- multi_tissue_de(design1e, qnorm = FALSE, min_TPM = 0.01)
   
   de_summary(de_res_1a, sig = 0.05)
+  de_summary(de_res_1a_0.01, sig = 0.05)
   de_summary(de_res_1b, sig = 0.05)
   de_summary(de_res_1c, sig = 0.05)
   de_summary(de_res_1d, sig =  0.05)
+  de_summary(de_res_1d_0.01, sig =  0.05)
+  de_summary(de_res_1e, sig =  0.05)
+  de_summary(de_res_1e_0.01, sig =  0.05)
   
   save(de_res_1a, file = here::here("data/differential_expression/ALS/Model_1a_limma_res.RData") )
   save(de_res_1b, file = here::here("data/differential_expression/ALS/Model_1b_limma_res.RData") )
   save(de_res_1c, file = here::here("data/differential_expression/ALS/Model_1c_limma_res.RData") )
   save(de_res_1d, file = here::here("data/differential_expression/ALS/Model_1d_limma_res.RData") )
+  
   
 }else{
   load( here::here("data/differential_expression/ALS/Model_1a_limma_res.RData") )
@@ -310,51 +406,269 @@ if(rerun){
 
 Design 1a - naive model that corrects for sex, rin and prep only, finds 1000s of DEGs in each tissue.
 
+Exploration
 
-# Model 2 - quantile normalised
+# Quantile normalisation?
 
-```{r quantnorm}
-
+```{r}
+## first - does quantile normalisation actually help?
 if(rerun){
-  
-  de_res_2a <- multi_tissue_de(design1a, qnorm = TRUE)
-  de_res_2b <- multi_tissue_de(design1b, qnorm = TRUE)
-  de_res_2c <- multi_tissue_de(design1c, qnorm = TRUE)
-  de_res_2d <- multi_tissue_de(design1d, qnorm = TRUE)
-  
-  de_summary(de_res_2a, sig = 0.05)
-  de_summary(de_res_2b, sig = 0.05)
-  de_summary(de_res_2c, sig = 0.05)
-  de_summary(de_res_2d, sig =  0.05)
-  
-  save(de_res_2a, file = here::here("data/differential_expression/ALS/Model_2a_limma_res.RData") )
-  save(de_res_2b, file = here::here("data/differential_expression/ALS/Model_2b_limma_res.RData") )
-  save(de_res_2c, file = here::here("data/differential_expression/ALS/Model_2c_limma_res.RData") )
-  save(de_res_2d, file = here::here("data/differential_expression/ALS/Model_2d_limma_res.RData") )
-  
-}else{
-  load( here::here("data/differential_expression/ALS/Model_2a_limma_res.RData") )
-  load( here::here("data/differential_expression/ALS/Model_2b_limma_res.RData") )
-  load( here::here("data/differential_expression/ALS/Model_2c_limma_res.RData") )
-  load( here::here("data/differential_expression/ALS/Model_2d_limma_res.RData") )
+x1 <- runDifferentialExpression("Cervical_Spinal_Cord", design = design1e, min_TPM = 0, cache = FALSE) # 25,365 genes
+x1_qn <- runDifferentialExpression("Cervical_Spinal_Cord", design = design1e, min_TPM = 0, cache = FALSE, quantile_norm = TRUE) # 25,365 genes
+#
+de_summary(list(x1, x1_qn) )
+de_cor(res = list("x1" = x1, "x1_qn" = x1_qn), type = "log_fc")
 }
 ```
+
+Quantile normalisation doesn't actually help - fewer genes and correlation of both t stats and lfc is 0.98 - unncessary
+
+## Model complexity, discovery rate and Lumbar-Cervical correlation
+
+Create list of models of increasing complexity, first adding known sources of variation (RIN, prep, submitting site, genetic PCS) and then add each technical variable in the order they appear in VariancePartition.
+
+Which model maximises the correlation between Lumbar and Thoracic as well as the maximum number of differentially expressed genes?
+
+```{r}
+
+# create models of increasing complexity
+model_list <- c(
+  # simplest - 1
+  "~ disease",
+  # adjusting for sex age and ethnicity
+  "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5",
+  # adding RIN
+  "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared ",
+  # adding prep
+  "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + site",
+  # adding site
+  "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + site + prep",
+  # stranding
+  "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + prep + site + pct_r1_transcript_strand_reads",
+  # 5' bias
+  "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + prep + site + pct_r1_transcript_strand_reads + median_5prime_bias ",
+  # chimeric
+  "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + prep + site + pct_r1_transcript_strand_reads + median_5prime_bias + pct_chimeras ",
+  # mRNA bases
+  "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + prep + site + pct_r1_transcript_strand_reads + median_5prime_bias + pct_chimeras + pct_mrna_bases",
+  # 3' bias
+  "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + prep + site + pct_r1_transcript_strand_reads + median_5prime_bias  + pct_chimeras + pct_mrna_bases + median_3prime_bias",
+  # intergenic
+  "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + prep + site + pct_r1_transcript_strand_reads + median_5prime_bias  + pct_chimeras + pct_mrna_bases + median_3prime_bias + pct_intergenic_bases",
+  # ribosomal
+ "~ disease + sex + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + prep + site + pct_r1_transcript_strand_reads + median_5prime_bias  + pct_chimeras + pct_mrna_bases + median_3prime_bias + pct_intergenic_bases + pct_ribosomal_bases"
+  
+)
+
+model_names <- c("disease", "+ clinical factors", "+ RIN", 
+                 "+ submission site", 
+                 " + library batch", 
+                 "+ % stranding", 
+                 "+ 5' bias", 
+                 "+ % chimeras",
+                 "+ % mRNA bases", 
+                 "+ 3' bias",
+                 "+ intergenic bases", 
+                 "+ % ribosomal bases"
+)
+
+names(model_list) <- model_names
+#names(model_list) <- 1:length(model_list)
+
+rerun <- TRUE
+if(rerun){
+model_res <-  map(model_list , ~{
+  list(
+    CSC = runDifferentialExpression("Cervical_Spinal_Cord", design = .x, min_TPM = 0, cache = FALSE),
+    LSC = runDifferentialExpression("Lumbar_Spinal_Cord", design = .x, min_TPM = 0, cache = FALSE)
+  )
+}, .id = "model" )
+  save(model_res, file = here::here("data/differential_expression/model_thresholding_res.RData"))
+}else{
+  load( here::here("data/differential_expression/model_thresholding_res.RData"))
+}
+
+#names(model_res) <- model_names
+
+#de_cor(model_res[[2]])
+
+all_model_cor <- map_df(model_res, de_cor, .id = "model") %>%
+  mutate(model = factor(model, levels = (model_names) ))
+
+all_model_n <- map_df(model_res, de_summary, .id = "model") %>%
+  mutate(model = factor(model, levels = model_names ))
+
+# plot correlation and DEG discovery with increasing model complexity
+all_model_cor %>% 
+  ggplot(aes(x = model, y = r )) + 
+  geom_point() + 
+  labs( y = "Cervical - Lumbar Pearson correlation", x = "Model complexity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+all_model_n %>%
+  ggplot(aes(x = model, y = n_sig )) + facet_wrap(~tissue) + 
+  geom_point() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+all_model_n %>%
+  ggplot(aes(x = as.numeric(model), y = n_strong )) + facet_wrap(~tissue) + geom_point()
+
+
+```
+
+## TPM thresholds and discovery rate
+
+```{r}
+min_tpm <- c(-Inf, 0, 0.001, 0.01, 0.1, 1)
+
+if(rerun){
+tpm_res <-  map(min_tpm , ~{
+  list(
+    CSC = runDifferentialExpression("Cervical_Spinal_Cord", design = design1e, min_TPM = .x, cache = FALSE),
+    TSC = runDifferentialExpression("Thoracic_Spinal_Cord", design = design1a, min_TPM = .x, cache = FALSE),
+    LSC = runDifferentialExpression("Lumbar_Spinal_Cord", design = design1e, min_TPM = .x, cache = FALSE)
+  )
+}, .id = "threshold" )
+  save(tpm_res, file = here::here("data/differential_expression/TPM_thresholding_res.RData"))
+}else{
+  load( here::here("data/differential_expression/TPM_thresholding_res.RData"))
+}
+
+names(tpm_res) <- min_tpm
+
+tissue_conversion_table <- tibble(
+  tissue_short = c("CSC", "TSC", "LSC"),
+  tissue_med = c("Cervical", "Thoracic", "Lumbar"),
+  tissue_long = c("Cervical Spinal Cord", "Thoracic Spinal Cord", "Lumbar Spinal Cord") 
+)
+
+tpm_tissue_res <- 
+  map_df(tpm_res, ~{
+  map_df(.x, ~{
+    tibble(n = nrow(.x),
+           sig = sum(.x$adj_p_val < 0.05),
+           strong = sum(.x$adj_p_val < 0.05 & abs(.x$log_fc) >= 1),
+           weak = sum(.x$adj_p_val < 0.05 & abs(.x$log_fc < 1))
+           )
+  }, .id = "tissue")
+}, .id = "threshold") %>%
+  mutate(null = n - (strong + weak), pct_strong = strong / n, pct_weak = weak / n ) %>%
+  left_join(tissue_conversion_table, by = c("tissue" = "tissue_short")) %>%
+  mutate(threshold = gsub("-Inf", "None", threshold)) %>% 
+  mutate(threshold = fct_relevel(threshold, "None"))
+
+
+set_names <- tibble(
+  name = c("pct_strong", "pct_weak", "strong", "weak", "null"),
+  label = c(rep(c("FDR < 0.05; |LFC| > 1", "FDR < 0.05; |LFC| < 1"),2), "FDR > 0.05")
+) %>%
+  mutate(label = factor(label, levels = c("FDR < 0.05; |LFC| > 1", "FDR < 0.05; |LFC| < 1", "FDR > 0.05") ) )
+
+## plot discovery numbers
+library(ggbreak)
+
+tpm_discovery_n_plot <- 
+  tpm_tissue_res %>%
+  select(tissue_med, threshold, strong, weak, null) %>%
+  pivot_longer(cols = !c(tissue_med, threshold)) %>%
+  left_join(set_names) %>%
+  ggplot(aes(x = threshold, y = value)) + 
+  geom_col(aes(fill = label) ) + 
+  facet_wrap(~tissue_med) +
+  scale_fill_manual(values = c("#B61927","#EB7F56", "grey")) +
+  theme_jh() + 
+  #theme(legend.position = "top") +
+  labs(x = "median TPM threshold", y = "Total genes tested", fill = "") +
+  #scale_y_continuous( ) +
+  ylim(0,61000) +
+  scale_y_break(c(27500,50000), ticklabels= c(50000,60000), expand = c(0,0)  ) +
+  geom_text( data= tpm_tissue_res,  aes(x = threshold, y = n + 1000, label = strong ), size =2 ) +
+  geom_text( data= tpm_tissue_res,  aes(x = threshold, y = null + (weak/2), label = weak ), size = 2 ) +
+  theme(axis.ticks = element_line(colour = "black"),
+    axis.text = element_text(colour = "black", size = 8), 
+    axis.ticks.y.right = element_blank(),
+    axis.text.y.right = element_blank(), legend.text = element_text(size = 5, face = "bold"), 
+      legend.key.size = unit(0.5, 'cm'), legend.background = element_blank(), 
+    legend.margin =margin(0,0,0,0,unit = "pt") 
+  )
+
+tpm_discovery_n_plot
+
+
+ggsave(plot = tpm_discovery_n_plot, filename = here::here("ALS_SC/plots/tpm_threshold_discovery.png") , width = 7.5, height =4 )
+
+# plot percentages
+
+
+de_summary(tpm_res) %>% rename(threshold = tissue)  %>% arrange(threshold)
+
+mn_markers <- map_df(tpm_res, ~{ 
+  map_df(.x, ~{ 
+    .x %>% filter(genename %in% c("CHAT", "ISL1", "MNX1")) 
+    }, .id = "tissue")
+  }, .id = "threshold")
+
+mn_markers %>% ggplot(aes(x = log_fc, y = threshold)) + geom_point(aes(colour = genename) ) + facet_wrap(~tissue)
+
+```
+
+In the two larger tissues, reducing TPM threshold to 0 increases DEG discovery rate.
+
+ISL1 and MNX1 can all be identified as DEGs in Cervical spinal cord at a median TPM threshold > 0.001
+
+Plan -
+for Thoracic, use simplest model (1a) and a modest TPM theshold (0.1)
+for Cervical and Lumbar use moderately complex model and no TPM threshold (median TPM > 0)
+
+Carry out plan - go see how new permissive thresholds change downstream analysis
+
+```{r}
+if(rerun){
+de_res_mar2022 <- list(
+    CSC = runDifferentialExpression("Cervical_Spinal_Cord", qnorm = FALSE, design = design1e, min_TPM = 0, cache = FALSE),
+    TSC = runDifferentialExpression("Thoracic_Spinal_Cord", design = design1a, min_TPM = 0.1, cache = FALSE),
+    LSC = runDifferentialExpression("Lumbar_Spinal_Cord", design = design1e, min_TPM = 0, cache = FALSE)
+  )
+de_summary(de_res_mar2022, sig = 0.05)
+
+map(de_res_mar2022, ~{.x %>% filter(genename %in% c("CHAT", "ISL1", "MNX1")) })
+de_res_final <- de_res_mar2022
+save(de_res_final, file = here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res_Mar2022.RData"))
+}else{
+  load(here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res_Mar2022.RData") )
+}
+
+de_summary(de_res_final)
+```
+
+Latest models capture ISL1 and MNX1 in CSP.
+
+
 
 ## Write out data and tables
 
 ```{r}
-de_res_final <- list(de_res_2d$Cervical_Spinal_Cord, de_res_2a$Thoracic_Spinal_Cord, de_res_2d$Lumbar_Spinal_Cord)
-#names(de_res_final) <- c("Cervical Spinal Cord", "Thoracic Spinal Cord", "Lumbar Spinal Cord")
+
+#de_res_final <- list(de_res_2d$Cervical_Spinal_Cord, de_res_2a$Thoracic_Spinal_Cord, de_res_2d$Lumbar_Spinal_Cord)
+# New - March 2022 - revise the models
+#de_res_final <- list(de_res_1e_0.01$Cervical_Spinal_Cord, de_res_1a_0.01$Thoracic_Spinal_Cord, de_res_1e_0.01$Lumbar_Spinal_Cord)
+
+
+#
 names(de_res_final) <- c("CSC", "TSC", "LSC")
+de_summary(de_res_final, sig = 0.05)
+#de_cor(de_res_final)
 
 save(de_res_final, file = here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res.RData"))
 
 
 
-names(de_res_final) <- c("Cervical", "Thoracic", "Lumbar")
+#names(de_res_final) <- c("Cervical", "Thoracic", "Lumbar")
 ```
 
+## Write out table for supplement
 
+ADD TABLE IN!
 
 ```{r}
 
@@ -373,42 +687,428 @@ de_res_final$LSC %>%
   arrange(cervical.p)
 
 
-write_tsv(als_deg_table, "../../ALS_SC/tables/als_control_deg_combined.tsv")
+write_tsv(als_deg_table, here::here("ALS_SC/tables/als_control_deg_combined.tsv") )
 
 ```
 
+# Correlation by expression level
+
+```{r}
+names(de_res_final) <-c("Cervical", "Thoracic","Lumbar")
+
+
+cor_ranges <- function(
+  model,
+  type = "t",
+  mins = c(-Inf, -Inf,-2,-1,0,1,2,3,4,5,6,7),
+  maxs = c(Inf, -2,-1,0,1,2,3,4,5,6,7,Inf),
+  min_p = 1){
+  
+  map2_df(mins, maxs, ~{
+    de_cor(model,type, .x, .y, min_p = min_p )
+  })
+}
+
+## Plot correlations at range of binned expression levels
+# compare effect of gating genes on nominal P < 0.05
+de_cor(de_res_final) # CSC-LSC t stat = 0.85
+
+cor_range_df <- cor_ranges(de_res_final, type = "t") %>%  mutate(type = "t~statistic")
+cor_range_df_lfc <- cor_ranges(de_res_final, type = "log_fc") %>%  mutate(type = "log[2]~fold~change" )
+
+
+make_cor_range_plot <- function(data, title = NULL){
+  data <- mutate(data, Pair = paste0(x, "\nvs\n", y) )
+  #data$label <- paste0( data$max, "\n(", data$n, ")" )
+  #data$label <- forcats::fct_re(data$label)
+  total_cor <- filter(data, min == -Inf, max == Inf)
+  data %>%
+  filter( min != -Inf & max != Inf) %>%
+  ggplot(aes(x = max, y = r)) + 
+    geom_hline(data = total_cor, aes(yintercept = r, colour = Pair), linetype = 2, show.legend=FALSE) +
+    geom_point(colour = "black") +
+    geom_point(aes(colour = Pair), size = 0.8) +
+    #geom_text(data = total_cor, aes(x = -1,y = r + 0.05, label =paste0("\u03c1=",signif(r,2)) ), show.legend=FALSE, hjust = 0, size = 3 ) +
+    theme_jh() +
+    scale_y_continuous(name ="Pearson's \u03c1", limits = c(-0.2,1.05),breaks = c(0, 0.5, 1) ) +
+    scale_x_continuous(name = expression("Genes binned by mean"~expression), breaks = unique(data$max) ) +
+    labs(subtitle = title  ) +
+    facet_wrap(~type, labeller = label_parsed)
+}
+
+
+cor_range_plot <- make_cor_range_plot(bind_rows(cor_range_df, cor_range_df_lfc) )
+
+#cor_range_plot <- cor_range_df ) 
+
+#cor_range_df_0.05 <- cor_ranges(de_res_final, type = "log_fc", min_p = 0.05)
+
+#cor_range_plot_0.05 <- make_cor_range_plot(cor_range_df_0.05) + labs(title = "Genes with nominal P < 0.05")
+
+cor_range_plot
+
+ggsave(plot = cor_range_plot, filename =  here::here("ALS_SC/plots/downsample_expression_plot.png"), width = 4, height = 5  )
+
+```
+
+With higher gene expression levels comes greater correlation between tissues. When removing probable null genes (P >0.05) the correlation peaks at 0.9
+
+
+# CORRELATION BY DOWNSAMPLING
+## NEW for revisions - downsample Cervical and Lumbar to match Thoracic sample size
+
+Take cervical and lumbar datasets. Full datasets have correlation R of 0.87.
+Proceed to take random samples of each tissue of size X from X = 10 to X = N, where N is full dataset size, and keep results
+
+Then correlate log2FCs and T-statistics of each pair.
+
+In addition, check DEG discovery rate
+
+```{r}
 
 
 
 
-# Model 5 - quantile normalised AND Sinai Controls removed
 
-```{r no_sinai}
+batch_tissues <- c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord")
+
+n_list <- c(30, 50, 70, 90, 110, 130, 150)
+
+names(n_list) <- n_list
+times <- 10
 
 if(rerun){
-  
-  de_res_5a <- multi_tissue_de(design1a, qnorm = TRUE, no_sinai = TRUE)
-  de_res_5b <- multi_tissue_de(design1b, qnorm = TRUE, no_sinai = TRUE)
-  de_res_5c <- multi_tissue_de(design1c, qnorm = TRUE, no_sinai = TRUE)
-  de_res_5d <- multi_tissue_de(design1d, qnorm = TRUE, no_sinai = TRUE)
-  
-  de_summary(de_res_5a, sig = 0.05)
-  de_summary(de_res_5b, sig = 0.05)
-  de_summary(de_res_5c, sig = 0.05)
-  de_summary(de_res_5d, sig =  0.05)
-  
-  save(de_res_5a, file = here::here("data/differential_expression/ALS/Model_5a_limma_res.RData") )
-  save(de_res_5b, file = here::here("data/differential_expression/ALS/Model_5b_limma_res.RData") )
-  save(de_res_5c, file = here::here("data/differential_expression/ALS/Model_5c_limma_res.RData") )
-  save(de_res_5d, file = here::here("data/differential_expression/ALS/Model_5d_limma_res.RData") )
-  
+  downsample_res <-  map( n_list, ~{
+    n <- map2( 1:times, .y = .x, ~{
+      return(
+        multi_tissue_de(design1e, qnorm = FALSE, coef = 2, tissue_list = batch_tissues,downsample = .y, min_TPM = 0)
+      )
+    })
+    return(n)
+  })
+
+  save(downsample_res, file = here::here("data/differential_expression/ALS/downsampling_res.RData") )
 }else{
-  load( here::here("data/differential_expression/ALS/Model_5a_limma_res.RData") )
-  load( here::here("data/differential_expression/ALS/Model_5b_limma_res.RData") )
-  load( here::here("data/differential_expression/ALS/Model_5c_limma_res.RData") )
-  load( here::here("data/differential_expression/ALS/Model_5d_limma_res.RData") )
+  load(here::here("data/differential_expression/ALS/downsampling_res.RData") )
 }
+
+#test1 <-multi_tissue_de(design1e, qnorm = FALSE, coef = 2, tissue_list = batch_tissues,downsample = NULL, min_TPM = 0)
+#test2 <-multi_tissue_de(design1e, qnorm = FALSE, coef = 2, tissue_list = batch_tissues,downsample = 150, min_TPM = 0)
+#de_summary(test1)
+#de_summary(test2)
+
+#de_cor(test1)
+#de_cor(test2)
+
+# correlate each tissue pair
+make_cor_res <- function(data, min_expr = -Inf, min_p = 1){
+  map_df(data, ~{
+    map_df(.x, ~{ 
+      # join together two tissues on shared genes
+      csc <- .x[[1]] %>% filter(ave_expr > min_expr, p_value < min_p)
+      lsc <- .x[[2]]%>% filter(ave_expr > min_expr, p_value < min_p)
+      csc_sig <- sum(csc$adj_p_val < 0.05)
+      lsc_sig <- sum(lsc$adj_p_val < 0.05)
+      csc_sig_plus <- sum(csc$adj_p_val < 0.05 & abs(csc$log_fc) > 1)
+      lsc_sig_plus <- sum(lsc$adj_p_val < 0.05 & abs(lsc$log_fc) > 1)
+      df <- inner_join(csc,lsc, by = c("genename", "geneid") )
+      tibble::tibble(
+        Cervical_Spinal_Cord = csc_sig, 
+        Lumbar_Spinal_Cord = lsc_sig,
+        Cervical_plus = csc_sig_plus,
+        Lumbar_plus = lsc_sig_plus,
+        n = nrow(df),
+        lfc_cor = cor(df$log_fc.x, df$log_fc.y, method = "pearson"),
+        t_cor = cor(df$t.x, df$t.y, method = "pearson")
+      )
+    }, .id = "subcohort")
+  }, .id = "cohort")
+}
+
+# sanity check
+#de_cor(list(Lumbar = de_res_final$LSC, Cervical = de_res_final$CSC) )
+#de_cor(downsample_res$`150`[[1]])
+
+ds_cor_res <- make_cor_res(downsample_res)
+
+
+# Compare to actual results
+# cohort size 174 (cervical) and 154 (lumbar)
+
+
+label_df <- tibble(
+  name = c("lfc_cor", "t_cor"),
+  label = c( "log[2]~fold~change", "t~statistic")
+) %>%
+  mutate(label = forcats::fct_rev(label) )
+
+# numbers from below:
+de_cor(de_res_final, "t")
+de_cor(de_res_final, "log_fc")
+# de_cor(de_res_final, "t", min_expr = 0)
+# de_cor(de_res_final, "log_fc", min_expr = 0)
+# de_cor(de_res_final, "t", min_expr = 2)
+# de_cor(de_res_final, "log_fc", min_expr = 2)
+# de_cor(de_res_final, "t", min_p = 0.05)
+# de_cor(de_res_final, "log_fc", min_p = 0.05)
+
+# add in actual cor values
+real_cor_df <- tibble(
+  label = rep(c("log[2]~fold~change", "t~statistic"), 4),
+  cor = c(0.69, 0.82, 0.83, 0.87, 0.89, 0.88, 0.97, 0.96),
+  threshold = c(-Inf, -Inf, 0,0,2,2, -Inf, -Inf),
+  p = c(1,1,1,1,1,1,0.05,0.05)
+) %>%
+  mutate(Pair = "CSC\nvs\nLSC") %>%
+    mutate(Pair = factor(Pair, levels = c("CSC\nvs\nLSC","CSC\nvs\nTSC","TSC\nvs\nLSC")))
+
+## plot correlations
+make_downsample_plot <- function(data, min_expr = -Inf, min_p = 1){
+  data %>%
+  make_cor_res(min_expr = min_expr, min_p = min_p) %>% 
+  #bind_rows(ds_cor_res_simple, ds_cor_res_full)  %>% 
+  select( -contains(c("Spinal_Cord", "plus") ) ) %>%
+  pivot_longer(cols = !c(cohort, subcohort,n ) )%>%
+  mutate(cohort = as.numeric(cohort)) %>% 
+  mutate(Pair = "CSC\nvs\nLSC") %>% 
+  mutate(Pair = factor(Pair, levels = c("CSC\nvs\nLSC","CSC\nvs\nTSC","TSC\nvs\nLSC"))) %>%
+  left_join(label_df, by = "name")  %>%
+  ggplot(aes(x = cohort, y = value)) + 
+  geom_jitter(aes(colour = Pair),width = 5, height = 0, size = 0.8, show.legend = FALSE) +
+  geom_boxplot(aes(group = cohort), outlier.color = NA, fill = NA, colour = "black") +
+  #geom_vline(data = real_data_df, aes(xintercept = cohort, colour = tissue), linetype = 2) +
+  theme_jh() +
+  facet_wrap(~label, labeller = label_parsed ) + 
+  labs(x = "downsampled cohort size", y = "Pearson's \u03c1") +
+  theme() +
+  scale_x_continuous(breaks =n_list, limits = c(20,160) ) +
+  scale_y_continuous(breaks = c(0, 0.5, 1),  limits = c(-0.2,1.05) ) +
+  geom_hline(data = real_cor_df %>% filter(threshold == min_expr, p == min_p), aes(yintercept = cor, colour = Pair), linetype = 2, show.legend = FALSE) #+
+  #geom_text(data = real_cor_df %>% filter(threshold == min_expr, p == min_p), 
+  #          aes(label = paste0("\u03c1=",cor), y = cor + 0.05, x = 20), 
+  #          size = 3,
+  #          hjust = 0 )
+
+}
+
+ds_cor_plot <- make_downsample_plot(downsample_res, min_expr = -Inf)
+ds_cor_plot
+
+#ds_cor_plot_2 <- make_downsample_plot(downsample_res, min_expr = 2)
+#ds_cor_plot_p_0.05 <- make_downsample_plot(downsample_res, min_expr = -Inf, min_p = 0.05)
+
+# ds_cor_multiplot <- 
+#   ds_cor_plot + labs(subtitle = "all genes") +
+#   ds_cor_plot_2 + labs(subtitle = "genes with log2(mean expression) > 2") +
+#   ds_cor_plot_p_0.05 + labs(subtitle = "genes with nominal P < 0.05") 
+
+#ds_cor_multiplot
+
+## plot with the expression binning plot
+ds_cor_plot
+
+
+ds_cor_multiplot <- cor_range_plot + ds_cor_plot + plot_layout(guides = "collect") 
+
+#ds_cor_multiplot
+#save(cor_multiplot, file = here::here("ALS_SC/plots/cor_multiplot.RData"))
+
+
+#ggsave(plot = cor_multiplot, filename = here::here("ALS_SC/plots/downsample_correlation_multiplot.png"), width = 10, height = 4)
+
+
 ```
+
+## Plot DEG discovery rates across downsampled cohorts
+
+```{r}
+#de_summary(de_res_mar2022)
+
+
+# plot DEG discovery
+#ds_deg_plot <- 
+real_data_df <- tibble(
+  cohort = c(174, 154, 54),
+  set = c("Cervical", "Lumbar", "Thoracic"),
+  n = c(7349, 4694,256),# actual numbers of genes
+  n_strong = c(377, 233,65)
+)
+
+## TOTAL DEG NUMBER
+ds_total_deg_plot <- 
+  ds_cor_res %>%
+  select( cohort, subcohort,n, contains("Spinal_Cord")) %>%
+  pivot_longer(cols = !c(cohort, subcohort,n) )%>%
+  mutate(cohort = as.numeric(cohort)) %>% 
+  mutate(tissue = gsub("_Spinal_Cord", "", name)) %>%
+  ggplot(aes(x = cohort, y = value) ) + 
+    geom_jitter(aes(group = paste(cohort,name), colour = tissue),
+             size = 0.8,width = 5 ) +
+  geom_boxplot(aes(group = paste(cohort,name) ), 
+                   outlier.color = NA, fill = NA,
+               position = position_dodge(width = 20)) +
+  geom_hline(data = real_data_df, aes(yintercept = n, colour = set), linetype = 2, show.legend = FALSE) +
+  #geom_point(data = real_data_df, aes(x = cohort, y = n), shape = 23, size = 2.5, colour = "black", fill = "red") +
+  theme_jh() +
+  facet_wrap(~ tissue ) + 
+ # scale_y_continuous(breaks = c(0,2000,4000,6000,8000), limits = c(0,8000)) +
+  labs(x = "downsampled cohort size", y = "DEGs at FDR < 0.05", colour = "DEGs found in\neach full tissue\ncohort") +
+  #theme(strip.text = element_text(face = "italic")) +
+  scale_x_continuous(breaks =n_list) +
+  labs(subtitle = "all DEGs")
+
+## STRONG DEGS
+ds_strong_deg_plot <-
+  ds_cor_res %>%
+  select( cohort, subcohort,n, contains("plus")) %>%
+  pivot_longer(cols = !c(cohort, subcohort,n ) )%>%
+  mutate(cohort = as.numeric(cohort)) %>% 
+  mutate(tissue = gsub("_plus", "", name)) %>%
+  ggplot(aes(x = cohort, y = value)) + 
+  geom_jitter(aes(group = paste(cohort,name), colour = tissue),
+             size = 0.8, width = 5 ) +
+  geom_boxplot(aes(group = paste(cohort,name) ), 
+                   outlier.color = NA, fill = NA,
+               position = position_dodge(width = 20)) +
+  theme_jh() +
+  facet_wrap(~ tissue ) + 
+  labs(x = "downsampled cohort size", y = "DEGs at FDR < 0.05", colour = "DEGs found in\neach full tissue\ncohort") +
+  #theme(strip.text = element_text(face = "italic")) +
+  scale_x_continuous(breaks =n_list ) +
+  geom_hline(data = real_data_df, aes(yintercept = n_strong, colour = set), linetype = 2, show.legend = FALSE) +
+  #geom_text(data = real_data_df, aes(x = cohort, y = n_strong*1.1,label = n_strong), size = 2.5, colour = "black") +
+  labs(subtitle = "DEGs with \u007c log fold change \u007c > 1")
+
+
+ds_deg_multiplot <- (ds_total_deg_plot + ds_strong_deg_plot + plot_layout(guides = "collect" )  ) &
+  plot_annotation(tag_levels = "a") &
+  theme(
+    plot.tag = element_text(face = "bold"), 
+    plot.subtitle = element_text( hjust = 0.5), 
+    #strip.text = element_text(face = "italic"),
+    axis.ticks = element_line(colour = "black"),
+    axis.text = element_text(colour = "black", size = 8),
+    axis.title = element_text(size = 10), legend.title = element_text(size = 10))
+
+ds_deg_multiplot
+
+ggsave(plot = ds_deg_multiplot, filename = here::here("ALS_SC/plots/downsample_deg_discovery_multiplot.png"), width = 10, height = 4)
+
+
+```
+
+With increasing sample size, the Lumbar-Cervical correlation increases. 
+Correlation between the two tissues can be increased by removing lowly expressed genes or restricting genes to those with nominal P < 0.05, where the Pearson's rho is 0.96.
+
+
+With increasing sample size, the number of DEGs increasees linearly.
+
+However, the number of strong DEGs (|LFC| > 1) plateaus much earlier, which similar or greater numbers of strong DEGs being found at downsamples of 70-90 samples.
+
+Make some scatter plots
+
+```{r}
+cor_scatter <- function(data, abs = FALSE, highlight = NA){
+  x <- names(data)[1]
+  y <- names(data)[2]
+  
+  plot <-data %>% mutate(label = ifelse(genename %in% highlight, genename, "")) %>% 
+    ggplot(aes_string(x = x, y =y ))  +
+    geom_point() + ggpubr::stat_cor()
+  return(plot)    
+}
+
+# baseline
+cor_scatter(de_cor(de_res_final, "t", return_object = TRUE) )
+cor_scatter(de_cor(de_res_final, "t", return_object = TRUE), abs = TRUE )
+
+cor_scatter(de_cor(de_res_final, "log_fc", return_object = TRUE) )
+cor_scatter(de_cor(de_res_final, "t", min_expr = 2, return_object = TRUE) )
+cor_scatter(de_cor(de_res_final, "log_fc", min_expr = 2, return_object = TRUE) )
+cor_scatter(de_cor(de_res_final, "t", min_p = 0.05, return_object = TRUE) )
+cor_scatter(de_cor(de_res_final, "log_fc", min_p = 0.05, return_object = TRUE) )
+
+```
+
+# New - run DE on CSC and LSC on the exact same donors only
+
+```{r}
+all_support <- read_tsv(here::here("data/differential_expression/ALS/ALS_all_differential_expression_support.tsv"))
+
+
+batch_tissues <- c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord")
+
+# get out only donors shared between tissues
+donor_df <- 
+  filter(all_support, tissue %in% batch_tissues) %>%
+  split(.$tissue) %>% map( "donor")
+
+shared_donors <- intersect(donor_df$Cervical_Spinal_Cord, donor_df$Lumbar_Spinal_Cord)
+# 130 shared donors, 109 ALS and 21 Control
+
+if(rerun){
+  donor_de <-  multi_tissue_de(design1e, qnorm = FALSE, coef = 2, tissue_list = batch_tissues, min_TPM = 0, donor_list = shared_donors)
+  save(donor_de, file =here::here("data/differential_expression/ALS/same_donor_res.RData")  )
+
+}else{
+  load(here::here("data/differential_expression/ALS/same_donor_res.RData"))
+}
+
+de_summary(donor_de)
+
+donor_deg_table <- 
+list(
+donor_de$Cervical_Spinal_Cord %>%
+  select(genename, geneid, cervical.lfc = log_fc, cervical.t = t, cervical.p = p_value, cervical.fdr = adj_p_val),
+donor_de$Lumbar_Spinal_Cord %>%
+  select(genename, geneid, lumbar.lfc = log_fc, lumbar.t = t, lumbar.p = p_value, lumbar.fdr = adj_p_val) 
+) %>%
+  reduce( left_join, by = c("genename", "geneid")) %>%
+  arrange(cervical.p)
+
+write_tsv(donor_deg_table, here::here("ALS_SC/tables/shared_donor_als_control_deg_combined.tsv") )
+
+```
+
+
+
+# Compare March 2022 model to previous model
+
+```{r}
+old <- de_res_1d$Cervical_Spinal_Cord
+old_sig_genes <- filter(old, adj_p_val < 0.05, abs(log_fc) > 1 )$genename
+
+new <- de_res_mar2022$CSC
+
+new %>% filter(abs(log_fc) > 1, adj_p_val < 0.05) %>%
+  ggplot(aes(x = log_fc, y = ave_expr)) + geom_point(aes(colour = genename %in% old_sig_genes ) )
+```
+
+New model finds many new strong effect genes,mostly among the lower expression levels, but also some that were presumably attenuated by the model covariates.
+
+
+# Permutation testing - NOT TO BE DONE
+
+permute disease labels and rerun DE 1000 times - how often do we observe higher DEG numbers than the true labels? NEVER
+
+```{r}
+
+if( rerun){
+## permute thoracic samples - smallest dataset
+# use simple design, median TPM > 0 (24,000 genes) 1000 permutations
+thoracic_perm_res <- runDifferentialExpression("Thoracic_Spinal_Cord", design = design1a, min_TPM = 0, cache = FALSE, permutations = 100)
+
+de_summary(thoracic_perm_res) %>% arrange(desc(n_sig))
+de_summary(thoracic_perm_res) %>% ggplot(aes(x = n_sig)) + geom_histogram()
+
+cervical_perm_res <- runDifferentialExpression("Cervical_Spinal_Cord", design = design1e, min_TPM = 0, cache = FALSE, permutations = 100)
+# 25,365 genes
+de_summary(cervical_perm_res) %>% arrange(desc(n_sig))
+de_summary(cervical_perm_res) %>% ggplot(aes(x = n_sig)) + geom_histogram()
+}
+
+```
+
 
 # C9 ALS vs Sporadic ALS
 
@@ -416,17 +1116,18 @@ if(rerun){
 ## Control vs C9
 
 ```{r c9orf72}
-design2  <- "~ disease_c9 + sex + prep + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+design2  <- "~ disease_c9 + sex + prep + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + site"
 
-design3 <- "~ disease_compare + sex + prep + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_ribosomal_bases + median_3prime_bias + median_5prime_bias"
+# to compare sALS to C9
+design3 <- "~ disease_compare + sex + prep + age + age_squared + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases"
 
 if(rerun){
   # control vs C9
-  de_res_3a <- multi_tissue_de(design2, qnorm = TRUE, coef = 2)
+  de_res_3a <- multi_tissue_de(design2, qnorm = FALSE, coef = 2, min_TPM = 0)
   # control vs sALS
-  de_res_3b <- multi_tissue_de(design2, qnorm = TRUE, coef = 3)
+  de_res_3b <- multi_tissue_de(design2, qnorm = FALSE, coef = 3, min_TPM = 0)
   # c9 vs sALS
-  de_res_3c <- multi_tissue_de(design3, qnorm = TRUE, coef = 2)
+  de_res_3c <- multi_tissue_de(design3, qnorm = FALSE, coef = 2, min_TPM = 0)
   
   
   save(de_res_3a, file = here::here("data/differential_expression/ALS/Model_3a_limma_res.RData"))
@@ -439,12 +1140,20 @@ if(rerun){
 }
 
 
+# control vs C9
 de_summary(de_res_3a, sig = 0.05)
+
+# control vs sALS
 de_summary(de_res_3b, sig = 0.05)
+
+# sALS vs C9ALS
 de_summary(de_res_3c, sig =  0.05)
 
 
 ```
+
+No sig genes between sALS and c9ALS!
+
 
 ## Compare just automatic or just manual prep samples
 
@@ -517,6 +1226,8 @@ No differences between bulbar and limb onset patients in any spinal cord section
 
 
 ```{r}
+
+
 make_count_matrix <- function(de_res){
   df <- de_res$E %>%
     as.data.frame() %>%
@@ -531,9 +1242,9 @@ make_count_matrix <- function(de_res){
 
 if(rerun){
   
-  lsc_df <- runDifferentialExpression(t = "Lumbar_Spinal_Cord", design = "~ 1", return_matrix = TRUE) %>% make_count_matrix()
-  csc_df <- runDifferentialExpression(t = "Cervical_Spinal_Cord", design = "~ 1", return_matrix = TRUE) %>% make_count_matrix()
-  tsc_df <- runDifferentialExpression(t = "Thoracic_Spinal_Cord", design = "~ 1", return_matrix = TRUE) %>% make_count_matrix()
+  lsc_df <- runDifferentialExpression(t = "Lumbar_Spinal_Cord", design = "~ 1", return_matrix = TRUE, min_TPM = 0) %>% make_count_matrix()
+  csc_df <- runDifferentialExpression(t = "Cervical_Spinal_Cord", design = "~ 1", return_matrix = TRUE, min_TPM = 0) %>% make_count_matrix()
+  tsc_df <- runDifferentialExpression(t = "Thoracic_Spinal_Cord", design = "~ 1", return_matrix = TRUE, min_TPM = 0) %>% make_count_matrix()
 
   save(lsc_df, csc_df, tsc_df, file = here::here("data/differential_expression/ALS/ALS_Spinal_Cord_count_matrices.RData"))
 }
@@ -550,39 +1261,86 @@ deconv_res <- read_tsv(here::here("data/deconvolution/Mathys_MuSiC_residual_resu
   select(sample, cell, deconv) %>%
   pivot_wider(names_from = cell, values_from = deconv)
 
-design7a  <- "~ disease + Mic + Ast + Oli + sex + rin + rin_squared + age + age_squared + prep + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
+design7a  <- "~ disease + Mic + Ast + Oli + End + Per + sex + rin + rin_squared + age + age_squared + prep + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
 
-design7d  <- "~ disease + Mic + Ast + Oli + sex + prep + age + age_squared + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
+design7d  <- "~ disease + Mic + Ast + Oli + End + Per + sex + prep + age + age_squared + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases"
+# everything but neurons
+design7e <- "~ disease + Mic + Ast + Oli + End + Per + sex + rin + rin_squared + age + age_squared + prep + site + pct_mrna_bases + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
+# everything
+design7f <- "~ disease + Mic + Ast + Oli + End + Per + Ex + sex + rin + rin_squared + age + age_squared + prep + site + pct_mrna_bases + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
 
 
 if(rerun){
-  de_res_7a <- multi_tissue_de(design7a, qnorm = TRUE, coef = 2)
-  de_res_7d <- multi_tissue_de(design7d, qnorm = TRUE, coef = 2)
-  
+  de_res_7a <- multi_tissue_de(design7a, coef = 2, min_TPM = 0)
+  #de_res_7d <- multi_tissue_de(design7d, coef = 2, min_TPM = 0)
+  de_res_7e <- multi_tissue_de(design7e, coef = 2, min_TPM = 0)
+  de_res_7f <- multi_tissue_de(design7f, coef = 2, min_TPM = 0)
+
+    
   de_summary(de_res_7a)
-  de_summary(de_res_7d)
+  de_summary(de_res_7e)
+  de_summary(de_res_7f)
+  
   #table(de_res_4$Lumbar_Spinal_Cord$adj_p_val < 0.15)
   
+  
   save(de_res_7a, file = here::here("data/differential_expression/ALS/Model_7a_limma_res.RData"))
-  save(de_res_7d, file = here::here("data/differential_expression/ALS/Model_7d_limma_res.RData"))
+  save(de_res_7e, file = here::here("data/differential_expression/ALS/Model_7e_limma_res.RData"))
   
   # pick the models for each tissue
-  model_7_final <- list(CSC = de_res_7d$Cervical_Spinal_Cord, LSC = de_res_7d$Lumbar_Spinal_Cord, TSC = de_res_7a$Thoracic_Spinal_Cord)
+  model_7_final <- list(CSC = de_res_7e$Cervical_Spinal_Cord, LSC = de_res_7e$Lumbar_Spinal_Cord, TSC = de_res_7a$Thoracic_Spinal_Cord)
   
   save(model_7_final, file = here::here("data/differential_expression/ALS/Model_7_limma_res.RData") )
 
 }else{
   load(here::here("data/differential_expression/ALS/Model_7a_limma_res.RData"))
   load(here::here("data/differential_expression/ALS/Model_7d_limma_res.RData")) 
+  load(here::here("data/differential_expression/ALS/Model_7_limma_res.RData"))
 }
 
 de_summary(de_res_7a)
-de_summary(de_res_7d)
+de_summary(de_res_7e)
+
+# compare regressed from regular DE
+regress_compare <- list(normal = de_res_final$CSC, regressed = de_res_7e$Cervical_Spinal_Cord)
+de_cor( regress_compare)
+
+cor_scatter(de_cor(regress_compare, "t", return_object = TRUE), highlight = c("CHIT1", "PON3", "CHRNA1", "CCL18") )
 
 
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_7e, tissue1 = "CSC", tissue2 = "Cervical_Spinal_Cord", col = "log_fc",highlight = c("CHIT1", "GPNMB", "CHRNA1", "SNORD3C", "MNX1") ) + 
+  labs( x = "Normal", y ="Regressed cell-type proportions minus neurons")
+
+plot_de_correlation(model_list1 = de_res_7e, model_list2 = de_res_7f, tissue1 = "Cervical_Spinal_Cord", tissue2 = "Cervical_Spinal_Cord", col = "log_fc",highlight = c("CHIT1", "GPNMB", "CHRNA1", "SNORD3C", "MNX1") ) + 
+  labs( x = "Normal", y ="Regressed ALL cell-type proportions")
 
 
+# compare DE accounting for cell-types to normal DE
+accounting_list <- c("CHIT1", "CCL18", "GPNMB", "CHRNA1", "MNX1", "ISL1", "C3", "MOBP", "SPI1")
+
+accounting_plot <- 
+  plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_7f, tissue1 = "Cervical", tissue2 = "Cervical_Spinal_Cord", col = "t",highlight = accounting_list ) + 
+  labs( x = "Normal model", y ="Adjusted for cell-type proportions") +
+  ggpubr::stat_cor(method = "pearson", aes(label = ..r.label..) ) +
+  labs(title = "t statistic") +
+  plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_7f, tissue1 = "Cervical", tissue2 = "Cervical_Spinal_Cord", col = "log_fc",highlight = accounting_list  ) + 
+  labs( x = "Normal model", y ="Adjusted for cell-type proportions") +
+  xlim(-3,5) + ylim(-3,5) +
+  ggpubr::stat_cor(method = "pearson", aes(label = ..r.label..) )  +
+labs(title =expression(log[2]~fold~change))
+
+accounting_plot
+
+ggsave(plot = accounting_plot, filename = here::here("ALS_SC/plots/celltype_proportion_accounting_comparison.png"), height = 5, width = 8 )
 ```
+
+Regressing out cell-types keeps a set of genes as DEGs, LYZ GPMNB etc but attenuates their effect sizes.
+
+MNX1 and ISL1 go from 49/57 place in most downregulated DEGs to 2/3rd place - this suggests that motor neuron loss can be observed in ALS spinal cord, albeit weakly, and regressing out cell-type proportions amplifies this signal somewhat.
+
+Virtually no difference between model including Excitatory neuron proportion vs not.
+
+
 
 # Age of onset effects, accounting for age at death
 
@@ -631,60 +1389,90 @@ design8d  <- "~ duration + sex + prep + age + age_squared + site + gPC1 + gPC2 +
 # without correcting for age
 design8e  <- "~ duration + sex + prep + site + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 + rin + rin_squared + pct_mrna_bases + pct_chimeras + pct_ribosomal_bases +  pct_intergenic_bases + median_3prime_bias + median_5prime_bias + pct_r1_transcript_strand_reads + pct_adapter"
 
+# reduced tech metrics with site and prep
+design8f <- "~ duration + sex + rin + rin_squared + prep + site + pct_mrna_bases + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
+
+
 if(rerun){
   de_res_8a <- multi_tissue_de(design8a, qnorm = TRUE, coef = 2, subsetby = "duration")
   de_res_8d <- multi_tissue_de(design8d, qnorm = TRUE, coef = 2, subsetby = "duration")
   de_res_8e <- multi_tissue_de(design8e, qnorm = TRUE, coef = 2, subsetby = "duration")
-
+  # relax covariates
+  de_res_8f <- multi_tissue_de(design8f, qnorm = TRUE, coef = 2, subsetby = "duration")
+  # relax TPM
+  de_res_8g <- multi_tissue_de(design8f, qnorm = TRUE, coef = 2, subsetby = "duration",min_TPM = 0)
+  
   de_summary(de_res_8a)
   de_summary(de_res_8d)
+  
   de_summary(de_res_8e)
+  de_summary(de_res_8f)
+  de_summary(de_res_8g)
   #table(de_res_4$Lumbar_Spinal_Cord$adj_p_val < 0.15)
+  
+  de_cor(de_res_8f)
+  de_cor(de_res_8g)
+  
+  de_cor(list(old = de_res_8d$Lumbar_Spinal_Cord, new = de_res_8g$Lumbar_Spinal_Cord))
+  de_cor(list(old = de_res_8d$Cervical, new = de_res_8g$Cervical_Spinal_Cord))
+  
   
   save(de_res_8a, file = here::here("data/differential_expression/ALS/Model_8a_limma_res.RData"))
   save(de_res_8d, file = here::here("data/differential_expression/ALS/Model_8d_limma_res.RData"))
   save(de_res_8e, file = here::here("data/differential_expression/ALS/Model_8e_limma_res.RData"))
+  save(de_res_8g, file = here::here("data/differential_expression/ALS/Model_8g_limma_res.RData"))
 
 
 }else{
   load(here::here("data/differential_expression/ALS/Model_8a_limma_res.RData"))
-  load(here::here("data/differential_expression/ALS/Model_8d_limma_res.RData")) 
-  load(here::here("data/differential_expression/ALS/Model_8e_limma_res.RData")) 
+  #load(here::here("data/differential_expression/ALS/Model_8d_limma_res.RData")) 
+  #load(here::here("data/differential_expression/ALS/Model_8e_limma_res.RData")) 
+  load(here::here("data/differential_expression/ALS/Model_8g_limma_res.RData")) 
     # pick the models for each tissue
-  model_8_final <- list(CSC = de_res_8d$Cervical_Spinal_Cord, LSC = de_res_8d$Lumbar_Spinal_Cord, TSC = de_res_8a$Thoracic_Spinal_Cord)
+  #model_8_old <- list(CSC = de_res_8d$Cervical_Spinal_Cord, LSC = de_res_8d$Lumbar_Spinal_Cord, TSC = de_res_8a$Thoracic_Spinal_Cord)
+  
+  model_8_mar2022 <- list(CSC = de_res_8g$Cervical_Spinal_Cord, LSC = de_res_8g$Lumbar_Spinal_Cord, TSC = de_res_8a$Thoracic_Spinal_Cord)
+  
   #de_res_final <- model_8_final
-  save(model_8_final, file = here::here("data/differential_expression/ALS/Model_8_limma_res.RData") )
+  save(model_8_old, file = here::here("data/differential_expression/ALS/Model_8_limma_res.RData") )
+  de_res_final <- model_8_mar2022
+  save(de_res_final, file = here::here("data/differential_expression/ALS/Model_8_limma_res_Mar2022.RData") )
 
 }
 
-de_summary(de_res_8a)
-de_summary(de_res_8d)
+#de_summary(de_res_8a)
+#de_summary(de_res_8d)
+#de_summary(de_res_8e)
 
-list(
-present_de(de_res_8a, title = "duration - simple"),
-present_de(de_res_8d, title = "duration - complex"),
-present_de(de_res_8e, title = "duration - complex, without age correction")
-) %>% bind_rows()
+#de_cor(de_res_8d)
+#de_cor(de_res_8e)
+
+# list(
+# present_de(de_res_8a, title = "duration - simple"),
+# present_de(de_res_8d, title = "duration - complex"),
+# present_de(de_res_8e, title = "duration - complex, without age correction")
+# ) %>% bind_rows()
 ```
 
 Combine tissues for supplementary table
 
 ```{r}
+names(model_8_mar2022)
 
 duration_deg_table <- 
 list(
-model_8_final$CSC %>%
+model_8_mar2022$CSC %>%
   select(genename, geneid, cervical.lfc = log_fc, cervical.t = t, cervical.p = p_value, cervical.fdr = adj_p_val),
-model_8_final$TSC %>%
+model_8_mar2022$TSC %>%
   select(genename, geneid, thoracic.lfc = log_fc, thoracic.t = t, thoracic.p = p_value, thoracic.fdr = adj_p_val),
-model_8_final$LSC %>%
+model_8_mar2022$LSC %>%
   select(genename, geneid, lumbar.lfc = log_fc, lumbar.t = t, lumbar.p = p_value, lumbar.fdr = adj_p_val) 
 ) %>%
   reduce( left_join, by = c("genename", "geneid")) %>%
   arrange(cervical.p)
 
 
-write_tsv(duration_deg_table, "../../ALS_SC/tables/duration_deg_combined.tsv")
+write_tsv(duration_deg_table, here::here("ALS_SC/tables/duration_deg_combined.tsv"))
 ```
 
 
@@ -902,63 +1690,6 @@ plot_cor_res <- function(data, method = "pearson", title = NULL){
 
 ```
 
-```{r}
-cor_res_1a <- run_cor(de_res_1a, de_res_1a, col = "t")
-cor_res_1b <- run_cor(de_res_1b, de_res_1b, col = "t")
-cor_res_1c <- run_cor(de_res_1c, de_res_1c, col = "t")
-cor_res_1d <- run_cor(de_res_1d, de_res_1d, col = "t")
-
-cor_res_2a <- run_cor(de_res_2a, de_res_2a, col = "t")
-cor_res_2b <- run_cor(de_res_2b, de_res_2b, col = "t")
-cor_res_2c <- run_cor(de_res_2d, de_res_2c, col = "t")
-cor_res_2d <- run_cor(de_res_2d, de_res_2d, col = "t")
-
-cor_res_5c <- run_cor(de_res_5d, de_res_5c, col = "t")
-cor_res_5d <- run_cor(de_res_5d, de_res_5d, col = "t")
-
-cor_res_3a <- run_cor(de_res_3a, de_res_3a, col = "t")
-cor_res_3b <- run_cor(de_res_3b, de_res_3b, col = "t")
-cor_res_3c <- run_cor(de_res_3c, de_res_3c, col = "t")
-# effect of quantile normalisation
-cor_res_qn <- run_cor(de_res_1b, de_res_2b, col = "t")
-
-# correlate between batches
-cor_res_batch <- run_cor(de_res_4a, de_res_4b, col = "t", tissue_list = batch_tissues)
-
-cor_res_duration <- run_cor(model_8_final, model_8_final, col = "t", tissue_list = c("CSC", "LSC", "TSC") )
-
-plot_cor_res(cor_res_1a, title = "Model 1a")
-plot_cor_res(cor_res_1b, title = "Model 1b")
-plot_cor_res(cor_res_1c, title = "Model 1c")
-plot_cor_res(cor_res_1d, title = "Model 1d")
-
-plot_cor_res(cor_res_2a, title = "Model 2a")
-plot_cor_res(cor_res_2b, title = "Model 2b")
-plot_cor_res(cor_res_2c, title = "Model 2c")
-plot_cor_res(cor_res_2d, title = "Model 2d")
-
-plot_cor_res(cor_res_5c, title = "Model 5c")
-plot_cor_res(cor_res_5d, title = "Model 5d")
-
-plot_cor_res(cor_res_3a, title = "Model 3a")
-plot_cor_res(cor_res_3b, title = "Model 3b")
-plot_cor_res(cor_res_3b, title = "Model 3c")
-
-plot_cor_res(cor_res_qn, title = "Quantile Norm")
-plot_cor_res(cor_res_batch, title = "Between Batches")
-plot_cor_res(cor_res_duration, title = "Disease duration")
-
-
-```
-
-The simplest DE model shows large >0.5 correlations between every tissue. But as the models get larger to account for more and more technical variation, the correlation structure shifts to only retain correlation between the two motor cortices and the three spinal cord samples. Importantly, correlation between CSP and LSP remains high (0.87-0.9) throughout model selection.
-
-Quantile normalisation has little impact on the correlation structure.
-
-Splitting samples by sequencing prep type and comparing DE between the two batches shows correlation in LSP and CSP (0.72, 0.55 and lower and even negative correlation in Cerebellum and Frontal Cortex (0.22, -0.26).
-
-For Thoracic Spinal Cord use model 2a - simple model.
-
 
 ```{r}
 present_de(de_res_final, title = "Control vs ALS")
@@ -968,8 +1699,6 @@ present_de(de_res_3c, title = "C9ALS vs SALS")
 
 
 ```
-
-
 
 
 ```{r}
@@ -990,22 +1719,29 @@ Temporal Cortex has the lowest correlation with every other tissue.
 
 ```{r fig.width = 9, fig.height = 3}
 
-plot_de_correlation <- function(model_list1, model_list2, tissue1, tissue2, col = "t", highlight = NULL){
+plot_de_correlation <- function(model_list1, model_list2, tissue1, tissue2, col = "t", highlight = NULL,xpos = NULL, ypos=NULL){
   require(ggrepel)
   res <- dplyr::left_join(model_list1[[tissue1]], model_list2[[tissue2]],  by = c("genename", "geneid") , suffix = c(".1", ".2") ) 
   
   x_string <- paste0(col, ".1")
   y_string <- paste0(col, ".2")
+  
+  cor_val <- cor(res[[x_string]], res[[y_string]], method = "pearson", use = "pairwise.complete.obs")
+  
   plot <- res %>%
+    select(all_of(x_string),all_of(y_string )) %>% 
+    drop_na() %>%
     ggplot(aes_string(x = x_string, y = y_string )) + 
     labs(x = gsub("_", " ", tissue1), y = gsub("_", " ", tissue2) ) + 
     theme_bw() + 
-    ggpubr::stat_cor(method = "pearson", aes(label = ..r.label..) ) +
+    annotate(geom = "text",x = xpos, y = ypos, label = paste0("\u03c1 = ", signif(cor_val,2) ), hjust = 0 ) +
+    #ggpubr::stat_cor(method = "pearson", aes(label = ..r.label..) ) +
     geom_hline(yintercept = 0, linetype = 3) + geom_vline(xintercept = 0, linetype = 3) +
     geom_abline(slope =1 , intercept = 0, linetype = 3) +    
     #geom_point(size = 1, alpha = 0.1) + 
     geom_bin2d(bins = 100) +
-    scale_fill_continuous(type = "viridis") +
+    scale_fill_continuous(type = "gradient") +
+    #scale_fill_gradient(low = "salmon", high = "firebrick3") +
     guides(fill = FALSE) +
     #xlim(-10,10) + ylim(-8,8) +
     theme_jh()
@@ -1013,56 +1749,75 @@ plot_de_correlation <- function(model_list1, model_list2, tissue1, tissue2, col 
   if(!is.null(highlight)){
     plot <- plot +
       geom_point(data = filter(res, genename %in% highlight), aes_string(x = x_string, y = y_string), colour = "red") +
-      geom_text_repel(data = filter(res, genename %in% highlight), aes_string(x = x_string, y = y_string, label = "genename"), colour = "red")
+      geom_text_repel(data = filter(res, genename %in% highlight), aes_string(x = x_string, y = y_string, label = "genename"), colour = "red", fontface = "italic", force = 10, min.segment.length = 0)
   }
   
   return(plot)
 }
 
-names(de_res_final) <-c("Lumbar", "Cervical", "Thoracic")
+#de_res_final <- de_res_mar2022
+names(de_res_final) <-c("Cervical", "Thoracic","Lumbar")
+
+de_res_final %>% map(nrow)
+de_cor(de_res_final)
+
 t_stat_plot <- 
-plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Lumbar")  +
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Lumbar", xpos = -10,ypos = 7.5)  +
   
-plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Thoracic", tissue2 = "Lumbar")  +
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Thoracic", tissue2 = "Lumbar", xpos = -10,ypos = 7.5)  +
 
-plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Thoracic") +
-  plot_annotation(title = "1. T-statistic") &  
-  xlim(-10,10) & ylim(-8,8) 
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Thoracic", xpos = -10,ypos = 7.5) +
+plot_annotation(title = "T-statistic") &  
+xlim(-10,11) & ylim(-10,11) 
 
-ggsave(plot = t_stat_plot, filename = "../../ALS_SC/plots/deg_t_stat_cor.pdf", width = 8.5, height = 3)
+#t_stat_plot
+
+#ggsave(plot = t_stat_plot, filename = here::here("ALS_SC/plots/deg_t_stat_cor.pdf"), width = 8.5, height = 3)
 
 lfc_plot <- 
-plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Lumbar", col = "log_fc")  +
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Lumbar", col = "log_fc",xpos = -3, ypos = 4)  +
   
-plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Thoracic", tissue2 = "Lumbar", col = "log_fc")  +
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Thoracic", tissue2 = "Lumbar", col = "log_fc",xpos = -3, ypos = 4)  +
 
-plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Thoracic", col = "log_fc") +
-  plot_annotation(title = expression("2."~log[2]~"fold change") ) &
-  ylim(-3,5) & xlim(-3,5) 
+plot_de_correlation(model_list1 = de_res_final, model_list2 = de_res_final, tissue1 = "Cervical", tissue2 = "Thoracic", col = "log_fc",xpos = -3, ypos = 4) +
+  plot_annotation(title = expression(~log[2]~"fold change") ) &
+ ylim(-3,5) & xlim(-3,5) 
 
-ggsave(plot = lfc_plot, filename = "../../ALS_SC/plots/deg_lfc_cor.pdf", width = 8.5, height = 3)
+#lfc_plot
 
-t_stat_plot
+#ggsave(plot = lfc_plot, filename = here::here("ALS_SC/plots/deg_lfc_cor.pdf"), width = 8.5, height = 3)
 
-lfc_plot
+grand_multiplot <- 
+lfc_plot /
+t_stat_plot /
+(cor_range_plot + ds_cor_plot + guide_area() + plot_layout(guides = "collect") + plot_layout(widths = c(1,1,0.25)) )  + 
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(face = "bold"),
+        axis.text = element_text(size = 8), 
+        axis.line = element_blank() )
 
-
+#grand_multiplot
+ggsave(plot = grand_multiplot, filename =here::here("ALS_SC/plots/all_correlation_multiplots.png"), dpi = 600 )
 #plot_de_correlation(model_list1 = model_8_final, model_list2 = model_8_final, tissue1 = "CSC", tissue2 = "LSC", col = "t" )
 
 ```
 
+# Plot correlation between Lumbar and Cervical duration associations
+
 ```{r}
+names(de_res_8g)
+dur_highlights <- c("CHIT1", "CHRNA1", "GPNMB", "C3", "DEFA1", "PON3")
 dur_cor_plot <- 
-  plot_de_correlation(model_list1 = model_8_final, model_list2 = model_8_final, tissue1 = "CSC", tissue2 = "LSC", col = "t" ) + 
+  plot_de_correlation(model_list1 = de_res_8g, model_list2 = de_res_8g, tissue1 = "Cervical_Spinal_Cord", tissue2 = "Lumbar_Spinal_Cord", col = "t",highlight = dur_highlights ) + 
   labs(title = "i) T statistic ", x = "Cervical", y ="Lumbar") +
-  plot_de_correlation(model_list1 = model_8_final, model_list2 = model_8_final, tissue1 = "CSC", tissue2 = "LSC", col = "log_fc" ) + 
+  plot_de_correlation(model_list1 = de_res_8g, model_list2 = de_res_8g,  tissue1 = "Cervical_Spinal_Cord", tissue2 = "Lumbar_Spinal_Cord", col = "log_fc", highlight = dur_highlights  ) + 
   labs(title = "ii) Log2 fold change", x = "Cervical", y ="Lumbar") +
   plot_annotation(title = "Disease duration associated genes")
 
 dur_cor_plot  
 
-ggsave(plot = dur_cor_plot, filename = "../../ALS_SC/plots/dur_cor_plot.pdf", width = 7, height = 3)
-
+ggsave(plot = dur_cor_plot, filename = here::here("ALS_SC/plots/dur_cor_plot.pdf"), width = 7, height = 3)
+ggsave(plot = dur_cor_plot, filename = here::here("ALS_SC/plots/dur_cor_plot.png"), width = 7, height = 3)
 ```
 
 
@@ -1091,11 +1846,12 @@ c9_plot <-
     plot_de_correlation(model_list1 = de_res_3a, model_list2 = de_res_3b, tissue1 = "Thoracic", tissue2 = "Thoracic", highlight = "C9orf72") +
   labs(x = "Control vs C9ALS", y = "Control vs sALS", subtitle = "Thoracic Spinal Cord") +
   plot_annotation(title = "Comparing C9orf72-ALS to Sporadic ALS") &
-  theme(plot.subtitle = element_text(hjust = 0.5))
+  theme(plot.subtitle = element_text(hjust = 0.5)) &
+  ggpubr::stat_cor(method = "pearson", aes(label = ..r.label..) )
 
 c9_plot 
 
-ggsave(plot = c9_plot, filename = "../../ALS_SC/plots/deg_c9_cor_plot.pdf", width = 8.5, height = 3)
+ggsave(plot = c9_plot, filename = here::here("ALS_SC/plots/deg_c9_cor_plot.png"), width = 8.5, height = 3)
 
 map_df(de_res_3c, ~{filter(.x, genename == "C9orf72") }, .id = "tissue")
 ```

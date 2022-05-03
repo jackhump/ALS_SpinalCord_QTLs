@@ -32,6 +32,23 @@ named_list_to_df <- function(named_list){
 
 Prepare marker gene lists from published papers and datasets
 
+## SynGO - Synaptic Gene Ontologies
+
+```{r}
+syngo_files <- here::here("data/SynGO/syngo_ontologies.xlsx")
+
+syngo <- readxl::read_excel(syngo_files) %>% janitor::clean_names() %>%
+  select(go_term_name, genes_hgnc_symbol) %>%
+  split(.$go_term_name) %>%
+  map(~{
+    return(unlist(str_split(.x[,2], ";")))
+  })
+
+save(syngo,file = here::here("data/markers/syngo_1.1.RData"))
+
+```
+
+
 ## Neuroexpresso
 
 ```{r}
@@ -55,6 +72,10 @@ nxp <- nxp[ c("MotorNeuron", "Oligo", "Microglia", "Astrocyte", "Endothelial")]
 
 save(nxp,file = here::here("data/markers/neuroexpresso_spinal_cord_human.RData"))
 
+
+nxp_df <- named_list_to_df(nxp)
+nxp_df$source <- "Mancarci et al., 2017" 
+nxp_df$PMID <- 29204516
 ```
 
 
@@ -82,6 +103,48 @@ kelley_df$PMID <- 30154505
 ```
 
 
+## Mathys
+
+```{r}
+load("data/deconvolution/Mathys_markers.RData")
+
+mathys <- Mathys_markers$markers
+save(mathys, file =  here::here("data/markers/Mathys_single_nucleus.RData"))
+
+conversion_table <- data.frame(short = c("Ast","End", "Mic", "Ex", "Oli", "Per" ),
+                               long = c("astrocytes", "endothelial", "microglia", "neurons", "oligodendrocytes", "pericytes"),
+                               mono = c("A","E","M","N","O","P"),
+                               title = c("Astrocytes", "Endothelial", "Microglia", "Neurons", "Oligos", "Pericytes")
+  )
+
+names(mathys) <- conversion_table$title[match()]
+
+
+mathys_df <- named_list_to_df(mathys)
+mathys_df$term_id <- conversion_table$title[ match(mathys_df$term_id, conversion_table$short)]
+
+mathys_df$source <- "Mathys et al. 2019"
+mathys_df$PMID <- 31042697
+
+mathys_df <- mathys_df[ !is.na(mathys_df$term_id),]
+```
+
+
+## Darmanis
+
+```{r}
+load(here::here("data/markers/Darmanis_single_cell.RData"))
+darmanis_df <- named_list_to_df(darmanis)
+
+darmanis_df$term_id <- conversion_table$title[ match(darmanis_df$term_id, conversion_table$long)]
+
+darmanis_df$source <- "Darmanis et al., 2015"
+darmanis_df$PMID <- 26060301
+
+```
+
+
+
 ## Panglaodb
 
 
@@ -89,7 +152,8 @@ kelley_df$PMID <- 30154505
 
 ```{r}
 pg <- read_tsv(here::here("data/Panglaodb/PanglaoDB_markers_27_Mar_2020.tsv.gz") ) %>% janitor::clean_names() %>%
-  filter(organ %in% c("Brain", "Vasculature", "Immune system"))
+  filter(organ %in% c("Brain", "Vasculature", "Immune system")) %>%
+  filter(cell_type %in% c("Endothelial cells", "Ependymal cells", "Microglia", "Neurons", "Motor neurons", "Oligodendrocytes", "Pericytes", "Astrocytes", "Cholinergic neurons"))
 
 pg_list <- select(pg, cell_type, official_gene_symbol) %>%
   split(.$cell_type) %>%
@@ -97,8 +161,10 @@ pg_list <- select(pg, cell_type, official_gene_symbol) %>%
 
 save(pg_list, file = here::here("data/markers/PanglaoDB_markers.RData"))
 
+panglao_df <- named_list_to_df(pg_list)
+panglao_df$source <- "Franzén et al., 2019"
+panglao_df$PMID <- 30951143
 ```
-
 
 ## Other markers
 
@@ -109,6 +175,7 @@ Liddelow Nature 2017 - reactive astrocytes - really a subset of Zamanian
 Boong Loong Teh Sci Rep 2017 - astrocytes treated with IL1beta , take top and bottom 50
 
 ```{r fig.width = 10, fig.height = 8}
+library(homologene)
 clean_zamanian <- function(file){
   df <- read_tsv(file)
   mouse_genes <- df$`Gene symbol`
@@ -215,11 +282,11 @@ Join together sets of activation  genes
 ```{r fig.height = 6, fig.width = 7}
 activation_sets <- list(
   #"Activated microglia" = nxp_mg,
-  "Disease-associated microglia" = dam_up,
-  "Reactive astrocytes - MCAO" = zamanian$Zamanian_MCAO,
-  "Reactive astrocytes - LPS" = zamanian$Zamanian_LPS,
-  "Disease-associated astrocytes" = daa_genes,
-  "Plaque-induced genes" = pig_genes
+  "DAM" = dam_up,
+  "RA-MCAO" = zamanian$Zamanian_MCAO,
+  "RA-LPS" = zamanian$Zamanian_LPS,
+  "DAA" = daa_genes,
+  "PIG" = pig_genes
   )
 
 
@@ -233,7 +300,7 @@ activation_meta <- tibble(
   term_id = names(activation_sets),
   source = c(
     "Keren-Shaul et al. 2017",
-    "Zamanian et al. 2012"
+    "Zamanian et al. 2012",
     "Zamanian et al. 2012",
     "Habib et al. 2020",
     "Chen et al. 2020 "
@@ -249,7 +316,9 @@ activation_meta <- tibble(
 
 activation_df <- left_join(activation_df, activation_meta, by = "term_id")
 
-supp_gene_table <- bind_rows(kelley_df, activation_df) 
+## Make supplementary table listing all cell type and activation markers used
+
+supp_gene_table <- bind_rows(mathys_df, kelley_df, darmanis_df, nxp_df, panglao_df, activation_df) 
 
 # add Ensembl IDs
 
@@ -268,9 +337,13 @@ supp_gene_table$EnsemblID <- gene_meta$geneid[ match( supp_gene_table$gene, gene
 supp_gene_table <- select(supp_gene_table, gene, EnsemblID, everything() ) %>%
   drop_na()
 
-write_tsv(supp_gene_table, file = "../../ALS_SC/tables/all_marker_activation_genes.tsv")
+write_tsv(supp_gene_table, file = here::here("ALS_SC/tables/all_marker_activation_genes.tsv") )
 
 ```
+
+
+## PLOTS
+
 
 Compare Kelley microglia and astrocyte markers to activation sets
 
@@ -386,7 +459,7 @@ Krach differentially expressed genes
 ```{r}
 krach_degs <- readxl::read_excel(here::here("data/Krach_MNs/krach_sm1.xlsx"), sheet = 1)
 
-de_res$LSC  %>%
+als_res$LSC  %>%
   left_join(krach_degs, by = c("genename" = "gene_name")) %>%
   #filter(adj_p_val < 0.05) %>%
   ggplot(aes(x = log_fc, y = log2FoldChange)) +
@@ -396,7 +469,7 @@ de_res$LSC  %>%
     plot_layout(nrow = 1) &
     theme_jh()
 
-de_res$CSC  %>%
+als_res$CSC  %>%
   left_join(krach_degs, by = c("genename" = "gene_name")) %>%
   left_join(nxp_gsea, by = c("genename" = "gene")) %>%
   ggplot(aes(x = log_fc, y = log2FoldChange, colour = term_id)) +
@@ -607,20 +680,91 @@ blum_markers <-
     human_homologene <- homologene(.x$gene, inTax = 10090, outTax = 9606 )
     human_homologene <- human_homologene[!duplicated(human_homologene) | !duplicated(human_homologene),]$`9606` 
     return(human_homologene)
-    }) %>%
-  named_list_to_df()
+    }) #%>%
+ # named_list_to_df()
 
-blum_gsea_res <-   map_df( de_res, ~{
-  customGSEA(.x, gsea_set = blum_markers, orderby = "t") #, n = 5000)
-  }, .id = "tissue") 
 
-gsea_plot(blum_gsea_res)
 
-gsea_box_plots("CSC", blum_markers )
-
+save(blum_markers,file =  here::here("data/markers/blum_spinal_cord.RData"))
 
 
 ```
 
 
+
+## Oeckl Proteomics in CSF and spinal cord
+
+CSF - done in controls, pre-symptomatic and symptomatic ALS cases
+
+Spinal Cord - done in controls and ALS cases
+
+```{r}
+csf <- readxl::read_excel(here::here("other_datasets/Oeckl_Proteomics/supp_material_2.xlsx"), sheet = 2, skip = 5) %>% janitor::clean_names() %>%
+  select(gene = gene_names,
+         lfc = log2_ratio_all_als_vs_con,
+         pval = log_students_t_test_p_value_all_als_vs_con
+         ) %>%
+  mutate(lfc = as.numeric(lfc), pval = 10^-(pval)) %>%
+  arrange(pval)
+# 1929 proteins tested in CSF
+
+csf_sig <- readxl::read_excel(here::here("other_datasets/Oeckl_Proteomics/supp_material_2.xlsx"), sheet = 3 ) %>%   
+  janitor::clean_names() %>%
+  select(gene = gene_names,
+         lfc = log_fold_change,
+         pval = log_p_value
+         ) %>%
+  mutate(lfc = as.numeric(lfc), pval = 10^-(pval)) %>%
+  arrange(pval)
+# 32 significant at presumed FDR < 0.05 - 34 when I use p.adjust(method = "fdr")
+
+
+# spinal cord
+sp <- readxl::read_excel(here::here("other_datasets/Oeckl_Proteomics/supp_material_4.xlsx"), sheet = 2, skip = 5) %>%   
+  janitor::clean_names() %>%
+  select(
+    gene = gene_names,
+    lfc = log2_ratio_als_vs_con,
+    pval = log_students_t_test_p_value_als_vs_con
+  ) %>%
+  mutate(lfc = as.numeric(lfc), pval = 10^-(pval)) %>%
+  arrange(pval)
+# 5115 proteins in spinal cord - h ≥ 3 valid values in both groups 
+
+sp$padj <- p.adjust(sp$pval, method = "fdr")
+table(sp$padj < 0.05)
+
+
+# only 41 significant according to FDR correction
+sp_genes <- unlist(strsplit(sp$gene,split = ";"))
+# splitting into individual genes gets 5,224
+
+# 292 significant proteins according to their thresholds - some kind of permutation test
+sp_sig <-  readxl::read_excel(here::here("other_datasets/Oeckl_Proteomics/supp_material_5.xlsx"), sheet = 1, skip = 4) %>%   
+  janitor::clean_names() %>%
+  select(
+    gene = gene_names,
+    lfc = log2_ratio_als_vs_con,
+    pval = log_students_t_test_p_value_als_vs_con
+  ) %>%
+  mutate(lfc = as.numeric(lfc), pval = 10^-(pval)) %>%
+  arrange(pval)
+
+
+sp$oeckl_padj <- sp$gene  %in% sp_sig$gene
+
+table(sp$oeckl_padj)
+
+oeckl <- list(csf = csf, csf_sig = csf_sig, sp = sp, sp_sig = sp_sig)
+
+save(oeckl, file = here::here("other_datasets/Oeckl_Proteomics/Oeckl_Proteomics.RData") )
+```
+
+Human motoneuron marker genes
+
+```{r}
+mn_markers <- readLines(here::here("data/markers/motorneuron_markers_pasted.txt"))
+
+
+```
 

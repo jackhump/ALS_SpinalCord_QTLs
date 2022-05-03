@@ -87,12 +87,15 @@ coloc_loci_order <- select(coloc_loci, locus, GWAS_P) %>% distinct() %>% arrange
 
 # Overlap with modules
 
+# since updated!
+
 ```{r}
 
-load(here::here("data/WGCNA/ALS_signed_deep_split_4/model2_WGCNA_module_names.RData"))
-load(here::here("data/WGCNA/ALS_signed_deep_split_4/model2_WGCNA_eigengenes.RData"))
+load(here::here("data/WGCNA/ALS_signed_deep_split_4/model2a_WGCNA_module_names.RData"))
+load(here::here("data/WGCNA/ALS_signed_deep_split_4/model2a_WGCNA_eigengenes.RData"))
 
 kelley_modules <- read_tsv( here::here("ALS_SC/tables/networks/networks_kelley_markers_enrich.tsv") )
+mathys_modules <- read_tsv( here::here("ALS_SC/tables/networks/networks_mathys_markers_enrich.tsv") )
 
 activation_modules <- read_tsv( here::here("ALS_SC/tables/networks/networks_activation_enrich.tsv") )
 
@@ -124,9 +127,10 @@ module_plot( left_join(coloc_modules, kelley_modules))
 #kelley_modules <- 
   
 kelley_module_plot <- module_plot( left_join(coloc_modules, kelley_modules))
+mathys_module_plot <- module_plot( left_join(coloc_modules, mathys_modules))
 activation_module_plot <- module_plot( left_join(coloc_modules, activation_modules))
 
-kelley_module_plot
+mathys_module_plot + kelley_module_plot + activation_module_plot + plot_layout(nrow = 3)
 ```
 M40: FNBP1 and SH3RF1 are in the Oligo module!
 M18: NFASC is in an astrocyte module positively associated with disease duration
@@ -150,7 +154,7 @@ mm <- geneModuleMembership[ coloc_hits$QTL_Ensembl,] %>%
   pivot_longer(cols = !c(ensemblID, gene), names_to = "module", values_to = "cor") %>%
   mutate(module = factor(module, levels = names(geneModuleMembership)))
 
- mm %>% ggplot(aes(x = gene, y = module, fill = cor, label = cor)) + geom_tile()
+ mm %>% ggplot(aes(x = gene, y = module, fill = cor, label = cor)) + geom_tile() + scale_fill_viridis_c()
 ```
 
 
@@ -256,6 +260,7 @@ als_deconv_cor_res <-
   tidyr::separate(col = cell_gene, sep = " ", into = c("cell", "gene")) %>%
   mutate(padj = p.adjust(p.value, method = "bonferroni"))
 
+nrow(als_deconv_cor_res) # N tests
 
 ### in control
 control_deconv_cor_res <- 
@@ -311,14 +316,14 @@ als_deconv_cor_plot
 control_deconv_cor_plot
 ```
 
-
+## UPDATE!
 # differential expression and duration associations
 
 ```{r}
 
-als_res <- load_results(here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res.RData"))
+als_res <- load_results(here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res_Mar2022.RData"))
 
-dur_res <- load_results(here::here("data/differential_expression/ALS/Model_8_limma_res.RData"))
+dur_res <- load_results(here::here("data/differential_expression/ALS/Model_8_limma_res_Mar2022.RData"))
 
 als_deg_plot <- 
 map_df( als_res, ~{ .x %>% filter(genename %in% coloc_hits$QTL_Gene ) }) %>%
@@ -371,12 +376,12 @@ map_df( dur_res, ~{ .x %>% filter(genename %in% coloc_hits$QTL_Gene ) }) %>%
 
 celltype_multiplot <- 
 kelley_gene_plot + theme(strip.text.x = element_text(face = "bold", size = 6), axis.text.x = element_text(face = "italic", size = 6) ) +
-kelley_module_plot + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.text.x = element_blank() ) +
+mathys_module_plot + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.text.x = element_blank() ) +
 activation_module_plot + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.text.x = element_blank() ) +
 als_deconv_cor_plot + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.text.x = element_blank() ) +
 als_deg_plot + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.text.x = element_blank() ) +
 dur_deg_plot +   theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.text.x = element_blank()) +
-  plot_layout(ncol = 1, heights = c(4,4,5,6,2,2), guides = "collect")  &
+  plot_layout(ncol = 1, heights = c(4,6,5,6,2,2), guides = "collect")  &
   theme(
       axis.line = element_blank(),
       strip.placement.x = "outside",

@@ -60,7 +60,7 @@ table(all_res$twas_bonferroni < 0.05) # 42 associations!
 
 Make plots
 
-```{r fig.width = 9, fig.height = 4}
+```{r fig.width = 9, fig.height = 10}
 
 make_z_plot <- function(data){
   gwas_order <- filter(data, twas_bonferroni < 0.05) %>% 

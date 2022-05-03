@@ -93,8 +93,6 @@ out_folder <- here::here("data/WGCNA/ALS_signed_deep_split_4/")
 if( !dir.exists(out_folder) ){dir.create(out_folder, recursive = TRUE)}
 
 rerun <- FALSE
- 
-
 
 gene_meta <- read_tsv(here::here("data/misc/gencode.v30.tx2gene.tsv.gz")) %>%
   select(-TXNAME) %>%
@@ -123,6 +121,9 @@ tissue
 sex
 C9orf72 vs non-C9
 Motor Onset
+
+NEW FOR REVISIONS
+Correlate modules with cell-type proportions!
 
 ```{r}
 support <-  read_tsv(here::here("data/differential_expression/ALS/ALS_all_differential_expression_support.tsv"))
@@ -174,29 +175,39 @@ support_onehot <-
 voom TMM normalisation
 
 ```{r}
+
 if(rerun){
   load(here::here("data/feb_2020/gene_counts_no_tags.RData") )
-  
+  load(here::here("data/feb_2020/gene_tpm_no_tags.RData") )
+
   counts_loc <- genes_counts[,support$sample]
+  tpm_loc <- genes_tpm[,support$sample]
   
   rm(genes_counts)
+  #
+  #isexpr <- rowSums(cpm(counts_loc)> 1 ) >= 0.5 * ncol(counts_loc)
+  # new for 2022
+  isexpr <- rowSums(tpm_loc > 0 ) >= 0.5 * ncol(counts_loc)
+
   
-  isexpr <- rowSums(cpm(counts_loc)> 1 ) >= 0.5 * ncol(counts_loc)
   # create data structure with only expressed genes
   counts_loc <- counts_loc[isexpr,]
   
-  print( paste0(" * Keeping ", nrow(counts_loc), " highly expressed genes"))
+  print( paste0(" * Keeping ", nrow(counts_loc), " expressed genes"))
   
   # keep only protein-coding genes
-
-  ensembl <- biomaRt::useMart(biomart="ensembl", dataset="hsapiens_gene_ensembl")
-
-  bm_res <-  biomaRt::getBM(attributes=c("ensembl_gene_id","gene_biotype"),
-                   filters = c("ensembl_gene_id","biotype"), 
-                   values = list(row.names(counts_loc),"protein_coding"), 
-                   mart=ensembl)
-  
-  counts_loc <- counts_loc[ row.names(counts_loc) %in% bm_res$ensembl_gene_id ,]
+  gencode_gene_types <- read_tsv("~/GENCODE/gencode.v30.gene.type.tsv.gz") %>%
+    filter(type == "protein_coding") %>%
+    mutate(gene_id = gsub("\\.[0-9]+", "", gene_id))
+  #library(biomaRt)
+  # ensembl <- useMart(biomart="ENSEMBL_MART_ENSEMBL")#, dataset="hsapiens_gene_ensembl")
+  # 
+  # bm_res <-  biomaRt::getBM(attributes=c("ensembl_gene_id","gene_biotype"),
+  #                  filters = c("ensembl_gene_id","biotype"), 
+  #                  values = list(row.names(counts_loc),"protein_coding"), 
+  #                  mart=ensembl)
+  # 
+  counts_loc <- counts_loc[ row.names(counts_loc) %in% gencode_gene_types$gene_id ,]
   
   print( paste0(" * Keeping ", nrow(counts_loc), " protein-coding genes"))
   
@@ -225,7 +236,14 @@ if(rerun){
   
   # removeBatchEffects
   covariate_df <- 
-    select(support, rin, pct_mrna_bases, median_3prime_bias, median_5prime_bias, pct_chimeras, gPC1, gPC2, gPC3, gPC4, gPC5, pct_ribosomal_bases, pct_intergenic_bases)
+    dplyr::select(support, rin, pct_mrna_bases, median_3prime_bias, median_5prime_bias, pct_chimeras, gPC1, gPC2, gPC3, gPC4, gPC5, pct_ribosomal_bases, pct_intergenic_bases)
+  
+  # for Mar 2022
+  covariate_df <- 
+    dplyr::select(support, rin, pct_mrna_bases, prep, gPC1, gPC2, gPC3, gPC4, gPC5) %>%
+    mutate(prep = as.numeric(as.factor(prep)) )
+  
+  #"~ disease + sex + rin + rin_squared + age + age_squared + prep + site + pct_mrna_bases + gPC1 + gPC2 + gPC3 + gPC4 + gPC5 "
 
   row.names(covariate_df) <- support$sample
 
@@ -241,9 +259,9 @@ if(rerun){
   
   pca_rbe <-  prcomp(counts_voom_rbe, center = TRUE, scale. = TRUE)
 
-  voom_plot <- autoplot(pca_voom, colour = "site", data =support, shape = "tissue") + labs(title = "Voom normalised") + theme_jh()
+  voom_plot <- autoplot(pca_voom, colour = "site", data =support, shape = "prep") + labs(title = "Voom normalised") + theme_jh()
   
-  rbe_plot <- autoplot(pca_rbe, colour = "site", data =support, shape = "tissue") + labs(title = "Voom normalised + Site and technical metrics regressed")+ theme_jh()
+  rbe_plot <- autoplot(pca_rbe, colour = "site", data =support, shape = "prep") + labs(title = "Voom normalised + Site and technical metrics regressed")+ theme_jh()
   
  # sva_plot <- autoplot(pca_sva, colour = "site",data =support) + labs(title = "Voom + SVA normalised")+ theme_jh()
   
@@ -251,20 +269,20 @@ if(rerun){
   print(rbe_plot)
   #print(sva_plot)
   
-  save(counts_voom_rbe, rbe_plot, file = here::here("data/WGCNA/ALS_SC_Voom_RBE.RData"))
+  save(counts_voom_rbe, rbe_plot, file = here::here("data/WGCNA/ALS_SC_Voom_RBE_Mar2022.RData"))
   #save(counts_voom_sva, sva_plot, file = here::here("data/WGCNA/ALS_SC_Voom_SVA.RData"))
-  save(counts_voom, voom_plot, file = here::here("data/WGCNA/ALS_SC_Voom.RData"))
+  save(counts_voom, voom_plot, file = here::here("data/WGCNA/ALS_SC_Voom_Mar2022.RData"))
   
 }else{
-  load(here::here("data/WGCNA/ALS_SC_Voom_RBE.RData"))
+  load(here::here("data/WGCNA/ALS_SC_Voom_RBE_Mar2022.RData"))
  # load(here::here("data/WGCNA/ALS_SC_Voom_SVA.RData"))
-  load(here::here("data/WGCNA/ALS_SC_Voom.RData"))
+ # load(here::here("data/WGCNA/ALS_SC_Voom_Mar2022.RData"))
 }
 
 
 ```
 
-
+March 2022: 16,922 protein coding genes with median TPM > 0
 
 ```{r}
 
@@ -430,7 +448,10 @@ run_WGCNA <- function(datExpr, prefix = "test", deep_split = 4, show_plots = FAL
 if(rerun){
   # default deepSplit is 4
   #run_WGCNA(counts_voom, prefix = "model1")
-  run_WGCNA(counts_voom_rbe, prefix = "model2", show_plots = TRUE)
+ # run_WGCNA(counts_voom_rbe, prefix = "model2", show_plots = TRUE)
+  
+  run_WGCNA(counts_voom_rbe, prefix = "model2a", show_plots = TRUE)
+
   #run_WGCNA(counts_voom_sva, prefix = "model3")
   # run_WGCNA(counts_voom_sva, prefix = "model4", deep_split = 3)
   # run_WGCNA(counts_voom_rbe, prefix = "model5", deep_split = 3)
@@ -449,7 +470,7 @@ Overlap with DEGs from the ALS vs Control models.
 
 # correlate traits in support_onehot with each module (spearman)
 # report correlations and P-values
-trait_assoc <- function(model, plot_return = NULL, return_object = FALSE){
+trait_assoc <- function(model, plot_return = NULL, return_object = FALSE, support_loc = support_onehot){
   require(WGCNA)
   load(paste0(out_folder, model, "_WGCNA_eigengenes.RData"))
 
@@ -461,7 +482,7 @@ trait_assoc <- function(model, plot_return = NULL, return_object = FALSE){
   #nGenes = ncol(datExpr)
   nSamples = nrow(MEs)
 
-  moduleTraitCor = cor(MEs, support_onehot, use = "p", method = "spearman") 
+  moduleTraitCor = cor(MEs, support_loc, use = "p", method = "spearman") 
   moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples)
   
   module_trait_res <-
@@ -489,11 +510,15 @@ trait_assoc <- function(model, plot_return = NULL, return_object = FALSE){
 }
 
 # plotting module eigengenes
-module_trait_plot <- function(m, trait, xlab = ""){
+module_trait_plot <- function(m, trait, xlabel = "", traits = support){
+  stopifnot(trait %in% colnames(traits))
+  if( ! "sample" %in% names(traits) ){
+    traits <- rownames_to_column(traits, var = "sample")
+  }
   module_eigengenes <- MEs %>%
     rownames_to_column(var = "sample") %>%
     tidyr::gather( key = "module", value = "ME", -sample) %>%
-    left_join(support, by = "sample") %>%
+    left_join(traits, by = "sample") %>%
     rename(module_name = module) %>%
     left_join(colour_df, by = "module_name") %>%
     filter(module_name == m)
@@ -510,10 +535,9 @@ module_trait_plot <- function(m, trait, xlab = ""){
       module_eigengenes %>%
       ggplot( aes_string( x = trait , y = "ME") ) +
       theme_classic() + 
-      xlab(trait) + 
-      ylab("Module eigengene") +
-      labs(title = m, x = xlab) +
+      labs( x = xlabel, y = m) +
     theme(axis.text = element_text(colour = "black"),
+          axis.title.y = element_text(colour = "black", angle = 0, size =12, face = "bold", vjust = 0.5),
           axis.ticks = element_line(colour = "black")
     #panel.border = element_rect(size = 0.6, colour = "black", fill = NA),
     )
@@ -524,10 +548,10 @@ module_trait_plot <- function(m, trait, xlab = ""){
       plot <- plot +
         geom_point(colour = "black", size = 1) +
         geom_point(aes(colour = module_name), size = 0.8) +
-        geom_smooth(method = "lm", colour = "black") +
+        geom_smooth(method = "lm", colour = "black", formula = y ~ x) +
         scale_colour_manual(values = module_colour_order ) +
-        guides(colour = FALSE) +
-        stat_cor(aes(label = ..r.label..), method = "spearman", label.x.npc = 0.65, label.y.npc =  0.99) 
+        guides(colour = "none") +
+        stat_cor(aes(label = ..r.label..), method = "spearman", label.x.npc = 0.5, label.y.npc =  0.15) 
       
       # if(m == "M18"){
       #   plot <- plot +
@@ -540,9 +564,9 @@ module_trait_plot <- function(m, trait, xlab = ""){
     if(mode == "categ"){
       plot <- plot +
         geom_jitter(width = 0.2, size = 0.5) +
-        geom_boxplot(aes(fill = module), outlier.colour = NA, notch = notch, colour = "black") +
+        geom_boxplot(aes(fill = module), outlier.colour = NA, notch = TRUE, colour = "black") +
         scale_fill_manual(values = module_colour_order ) +
-        guides(fill = FALSE) +
+        guides(fill = "none") +
         ggpubr::stat_compare_means()
       
     }
@@ -586,14 +610,12 @@ module_go <- function(model, rerun = FALSE, term_set = "KEGG"){
 
 }
 
-
-
 ## use lists of marker genes for fisher exact test overlaps with modules
 marker_gene_enrichment <- function(model, set = "kelley"){
   load(paste0(out_folder, model, "_WGCNA_eigengenes.RData"))
 
   module_gene_list <- split(gene_modules, gene_modules$module) %>% purrr::map("genename")
-  stopifnot(set %in% c("kelley", "activation", "nxp", "DEGs", "Panglaodb"))
+  stopifnot(set %in% c("kelley", "activation", "nxp", "DEGs", "Panglaodb", "mathys"))
   markers <- c()
   # marker_df is empty tibble - grow for each set to give annotations and order to data
   marker_df <- tibble()
@@ -613,13 +635,27 @@ marker_gene_enrichment <- function(model, set = "kelley"){
   
   if( "activation" %in% set){
     load(here::here("data/markers/activation_markers.RData"))
-    sets <- c( "Disease-associated microglia", "Disease-associated astrocytes", "Reactive astrocytes - MCAO", "Reactive astrocytes - LPS", "Plaque-induced genes")
-    activation_markers <- activation_sets[ sets] 
+    #sets <- c( "Disease-associated microglia", "Disease-associated astrocytes", "Reactive astrocytes - MCAO", "Reactive astrocytes - LPS", "Plaque-induced genes")
+    activation_markers <- activation_sets#[ sets] 
     
     markers <- c(activation_markers, markers)
     activation_df <- tibble(set = "Glial activation", marker = names(activation_markers) )
-    activation_df$marker <- factor(activation_df$marker, levels = sets)
+    activation_df$marker <- factor(activation_df$marker)#, levels = sets)
     marker_df <- c(marker_df, list(activation_df)) 
+  }
+  if( "mathys" %in% set){
+    mathys_conversion_table <- data.frame(
+      short = c("Ast","End", "Mic", "Ex", "Oli", "Per" ),
+      long = c("Astrocytes", "Endothelial", "Microglia", "Neurons", "Oligos", "Pericytes"),
+      mono = c("A","E","M","N","O","P")
+    )
+    load(here::here("data/markers/Mathys_single_nucleus.RData"))
+    names(mathys) <- mathys_conversion_table$long[ match(names(mathys), mathys_conversion_table$short)]
+    mathys <- mathys[ !is.na(names(mathys))]
+    markers <- c(mathys, markers)
+    mathys_df <- tibble(set = "Mathys", marker = names(mathys))
+    marker_df <- c(marker_df, list(mathys_df) )
+    
   }
   if( "Panglaodb" %in% set){
     load( here::here("data/Panglaodb/PanglaoDB_markers_list.RData") )
@@ -632,7 +668,7 @@ marker_gene_enrichment <- function(model, set = "kelley"){
   }
   
   if( "DEGs" %in% set){
-    load(file = here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res.RData"))
+    load(file = here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res_Mar2022.RData"))
     deg_markers <- de_res_final %>% 
       map_df( ~{.x %>% 
           filter(adj_p_val < 0.05) %>% # abs(log_fc) > 1) %>% 
@@ -685,11 +721,11 @@ marker_gene_enrichment <- function(model, set = "kelley"){
 # }
 
 
-trait_plot <- function(res, traits){
+trait_plot <- function(res, traits = trait_df$trait_label){
   # traits
-  trait_me %>%
+  res %>%
   mutate(padj = p.adjust(p.value, method = "bonferroni")) %>%
-  mutate(trait_label = factor(trait_label, levels = rev(trait_df$trait_label) )) %>%
+  mutate(trait_label = factor(trait_label, levels = rev(traits) )) %>%
   mutate(label = ifelse(padj < 0.05, "*", "")) %>%
   mutate(module = factor(module, levels = module_colour_order )) %>%
   ggplot(aes(x = module, y = trait_label, fill = correlation)) + 
@@ -748,11 +784,12 @@ marker_plot <- function(res, marker_levels = NULL){
 
 ```
 
-
+March 2022 -
+median TPM > 0, regressinng out prep, pct_mrna, rin, site, gPCs - 23 modules
 
 ```{r fig.width = 10, fig.height = 7}
 # load model
-model <- "model2"
+model <- "model2a"
 load(paste0(out_folder, model, "_WGCNA_eigengenes.RData"))
 # name modules by size
 
@@ -766,7 +803,10 @@ names(MEs) <- module_names$module_name[ match( gsub("ME", "", names(MEs)), modul
 module_eigengene_supp_table <- MEs %>%
   rownames_to_column(var  = "sample")
 
+module_eigengene_supp_table
+
 write_tsv(module_eigengene_supp_table, file = "ALS_SC/tables/networks/networks_eigengenes.tsv")
+
 MEDiss = 1-cor(MEs)
 # Cluster module eigengenes
 module_clust = hclust(as.dist(MEDiss), method = "average")
@@ -778,7 +818,7 @@ module_colour_order <- module_names$module[ match(module_name_order, module_name
 
 names(module_colour_order) <- module_name_order
 
-save( module_colour_order, module_names, file = here::here("data/WGCNA/ALS_signed_deep_split_4/model2_WGCNA_module_names.RData"))
+save( module_colour_order, module_names, file = here::here(paste0("data/WGCNA/ALS_signed_deep_split_4/",model, "_WGCNA_module_names.RData")))
 
 # write out gene modules
 gene_module_df <- gene_modules %>% left_join( module_names, by = "module") %>%
@@ -788,7 +828,15 @@ gene_module_df <- gene_modules %>% left_join( module_names, by = "module") %>%
 write_tsv(gene_module_df, here::here("ALS_SC/tables/networks/networks_module_genes.tsv") )
 
 eigengene_df <- MEs %>% rownames_to_column(var = 'sample')
-write_tsv(gene_module_df, here::here("ALS_SC/tables/networks/networks_eigengenes.tsv") )
+
+# use de-identified sample IDs
+sample_deid <- read_tsv(here::here("ALS_SC/tables/all_samples_used_in_study.tsv"))
+
+eigengene_df$sample_deid <- sample_deid$rna_id[match(eigengene_df$sample, sample_deid$external_sample_id)]
+
+eigengene_df <- dplyr::select(eigengene_df, sample_id = sample_deid, starts_with("M") )
+
+write_tsv(eigengene_df, here::here("ALS_SC/tables/networks/networks_eigengenes.tsv") )
 
 
 
@@ -797,7 +845,7 @@ write_tsv(gene_module_df, here::here("ALS_SC/tables/networks/networks_eigengenes
 Module membership
 
 ```{r}
-load(here::here("data/WGCNA/ALS_SC_Voom_RBE.RData"))
+load(here::here("data/WGCNA/ALS_SC_Voom_RBE_Mar2022.RData"))
 
 geneModuleMembership = as.data.frame(cor(counts_voom_rbe, MEs, use = "p"))
 MMPvalue = as.data.frame(WGCNA::corPvalueStudent(as.matrix(geneModuleMembership), nrow(counts_voom_rbe)));
@@ -834,6 +882,34 @@ colour_plot <-
         axis.text.x.top = element_text(angle = 90,hjust = 0.5, vjust = 0.5, colour = "black", size = 8,margin = margin() ),
         plot.margin = margin(b = 5, t = 0, unit = "pt") )
 
+# module size plot
+size_plot <- gene_module_df %>% 
+  group_by(module_name) %>% tally() %>%
+  inner_join(colour_df) %>%
+  mutate(module_name = factor(module_name, levels = names(module_colour_order) )) %>%
+  ggplot(aes(x = module_name, y = 1)) + 
+  geom_tile(aes(fill = n) )  +
+  #scale_fill_manual( values = module_colour_order) + #theme_void() +
+  #guides(fill = FALSE) +
+  scale_fill_gradient(low = "white", high = "black") +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_x_discrete(expand=c(0,0), position = "top") +
+  facet_wrap(~1) +
+  labs(x = "", y = "", fill = "Module size") +
+  theme_void() + 
+  theme(axis.ticks = element_blank(),
+        strip.text = element_blank(), 
+        axis.text.x.top = element_blank(),
+        strip.background = element_blank(),strip.placement = "inside",
+        panel.border = element_rect(size = 0.6, colour = "black", fill = NA),
+        axis.text.y = element_blank(),
+         legend.key.size = unit(0.25, 'cm'), 
+        legend.title = element_text(size = 5), 
+        legend.text = element_text(size =5),
+        #axis.text.x.top = element_text(angle = 90,hjust = 0.5, vjust = 0.5, colour = "black", size = 8,margin = margin() ),
+        plot.margin = margin(b = 5, t = 0, unit = "pt") )
+
+
 ## dendrogram
 
 dhc <- as.dendrogram(module_clust)
@@ -855,7 +931,7 @@ dendro_plot <-
 #marker_me_panglao <- marker_gene_enrichment("model2", set = c("Panglaodb"))
 
 
-marker_me_kelley <- marker_gene_enrichment("model2", set = c("kelley"))
+marker_me_kelley <- marker_gene_enrichment(model, set = c("kelley"))
 
 marker_kelley_df <- marker_me_kelley %>%
   left_join(module_names, by = "module") %>%
@@ -865,13 +941,26 @@ marker_kelley_df <- marker_me_kelley %>%
 
 write_tsv(marker_kelley_df, here::here("ALS_SC/tables/networks/networks_kelley_markers_enrich.tsv") )
 
+marker_me_mathys <- marker_gene_enrichment(model, set = c("mathys"))
+
+marker_mathys_df <- marker_me_mathys %>%
+  left_join(module_names, by = "module") %>%
+  mutate( set = "Mathys et al. 2020") %>%
+  select(module, module_name, marker, module_length, marker_length, overlap, ratio, p.value, padj ) %>%
+  arrange(padj)
+
+write_tsv(marker_mathys_df, here::here("ALS_SC/tables/networks/networks_mathys_markers_enrich.tsv") )
+
+
+
+
 trait_df <- tibble(
   trait = c("age", "onset", "duration", "motor_onsetLimb", "sexMale", "disease_c9sALS", "tSTMN2"),
   trait_label = c("Age at death", "Age at onset", "Disease duration", "Limb vs Bulbar onset", "Sex", "C9orf72", "tSTMN2")
 )
 
 trait_me <- 
-  trait_assoc("model2", return_object = TRUE) %>% 
+  trait_assoc(model, return_object = TRUE) %>% 
   left_join(trait_df, by = "trait") %>% 
   left_join(module_names, by = "module") %>%
   filter( !is.na(trait_label)  ) %>%
@@ -891,7 +980,7 @@ m2_marker_plot <- marker_plot(marker_me_kelley)
 
 #m2_marker_plot_panglao <- marker_plot(marker_me_panglao)
 
-deg_me <- marker_gene_enrichment("model2", set = c( "DEGs"))
+deg_me <- marker_gene_enrichment(model, set = c( "DEGs"))
 
 deg_me_df <- deg_me %>%
   left_join(module_names, by = "module") %>%
@@ -904,7 +993,7 @@ write_tsv(deg_me_df, here::here("ALS_SC/tables/networks/networks_deg_enrich.tsv"
 
 m2_deg_plot <- marker_plot(deg_me, marker_levels = c("Upregulated in ALS", "Downregulated in ALS"))
 
-marker_me_activation <- marker_gene_enrichment("model2", set = c("activation"))
+marker_me_activation <- marker_gene_enrichment(model, set = c("activation"))
 
 activation_me_df <- marker_me_activation %>%
   left_join(module_names, by = "module") %>%
@@ -914,9 +1003,17 @@ activation_me_df <- marker_me_activation %>%
 
 write_tsv(activation_me_df, here::here("ALS_SC/tables/networks/networks_activation_enrich.tsv") )
 
+# for supplement
+all_marker_enrich_df <- bind_rows(marker_mathys_df, activation_me_df)
+write_tsv(all_marker_enrich_df , here::here("ALS_SC/tables/networks/networks_celltype_activation_enrich.tsv") )
 
 
-m2_activation_plot <- marker_plot(marker_me_activation, marker_levels = c( "Disease-associated microglia", "Disease-associated astrocytes", "Reactive astrocytes - MCAO", "Reactive astrocytes - LPS", "Plaque-induced genes") )
+# new for 2022 - marker enrichment using Mathys top 100
+
+marker_me_mathys <- marker_gene_enrichment(model, set = c("mathys"))
+m2_mathys_plot <- marker_plot(marker_me_mathys)
+
+m2_activation_plot <- marker_plot(marker_me_activation) #marker_levels = c( "Disease-associated microglia", "Disease-associated astrocytes", "Reactive astrocytes - MCAO", "Reactive astrocytes - LPS", "Plaque-induced genes") )
 
 
 ```
@@ -929,7 +1026,7 @@ curate modules into consensus pathways
 # kegg_res <- module_go("model2", term_set = "KEGG", rerun = FALSE) %>% left_join(colour_df) %>%
 #   arrange(module_order)
 
-go_res <- module_go("model2", term_set = "GO:BP", rerun = FALSE) %>% left_join(colour_df) %>%
+go_res <- module_go("model2a", term_set = "GO:BP", rerun = FALSE) %>% left_join(colour_df) %>%
   arrange(module_order) %>%
   mutate(q = p.adjust(p, method = "bonferroni"))
 
@@ -965,13 +1062,15 @@ go_grep <- function(res, strings, module_order = module_colour_order){
 
 go_strings <-  c( 
                   "Extracellular matrix" = "extracellular matrix|adhesion",
-                  "Gene expression" = "gene expression|RNA processing|RNA metabol|transcription", 
+                  #"Gene expression" = "gene expression|RNA processing|RNA metabol|transcription", 
                   "Immune response" = "immune",
                   "Mitochondria" = "mitochondr|oxidative phosphorylation|electron transport chain" , 
                   "Myelination" = "myelination", 
+                  #"Cytoskeleton" = "cytoskeleton",
                   "Synaptic transmission"= "ynaptic", 
                   "Translation" = "ribo|translation",
-                  "Vasculature" = "vascula"
+                  "Vasculature" = "vascula",
+                  "Chromatin" = "chromatin|histone"
                   #"RNA splicing" = "RNA splicing", 
                   #"Oxidative phosphorylation" = "xidative phos",
                   #"Cell cycle" = "cell cycle",
@@ -1017,17 +1116,18 @@ Bring it all together
 module_plot <- 
   dendro_plot + 
   colour_plot + 
-  m2_trait_plot +
-  m2_marker_plot +
+  size_plot +
+  m2_mathys_plot +
   m2_activation_plot +
+    go_plot +
   m2_deg_plot +
-  go_plot +
-  plot_layout(ncol = 1, heights = c(3,1, 5,4, 5, 2, 8), guides = "collect") +
+  m2_trait_plot +
+  plot_layout(ncol = 1, heights = c(3,1,1, 6,5, 8, 2, 8), guides = "collect") +
   plot_annotation(theme = theme(plot.margin = margin() ))
 
-module_plot
+#module_plot
 
-ggsave(module_plot, filename = "ALS_SC/plots/WGCNA_module_assoc_plot.pdf", width = 8.5, height = 6 )
+ggsave(module_plot, filename = paste0("ALS_SC/plots/WGCNA_", model, "_module_assoc_plot.pdf"), width = 6, height = 6.6)
  
 
 ```
@@ -1037,15 +1137,18 @@ Module eigengenes
 ```{r}
 
 eigengene_plot <-
-module_trait_plot("M33", "duration", "Disease duration, months") +
-module_trait_plot("M31", "duration", "Disease duration, months") +
-module_trait_plot("M41", "tSTMN2", "Truncated STMN2 expression") +
+  module_trait_plot(m = "M8", trait = "duration", xlab = "Disease duration, months") +
+  module_trait_plot("M17", trait = "duration", "Disease duration, months") +
+  module_trait_plot("M20", trait = "tSTMN2", xlab = "tSTMN2 expression") +
+  module_trait_plot("M3", trait = "onset", xlab = "Age at symptom onset") +
 #module_trait_plot("M37", "duration", "Disease duration, months") +
 #module_trait_plot("M18", "duration", "Disease duration, months") +
 #module_trait_plot("M11", "tSTMN2", "Truncated STMN2 expression") +
-  plot_layout(nrow = 1)
+  plot_layout(ncol = 1)
 
-ggsave(plot = eigengene_plot, filename = "ALS_SC/plots/WGCNA_eigengene_plot.pdf", width = 8.5, height = 2.5)
+
+#eigengene_plot
+ggsave(plot = eigengene_plot, filename = "ALS_SC/plots/WGCNA_eigengene_plot.pdf", width = 3, height = 8)
 
 ```
 
@@ -1059,7 +1162,7 @@ Using the modules as sets of genes, perform GSEA with the differentially express
 module_gsea <- gene_modules %>%
   select(termid = module, gene = genename)
 
-load(file = here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res.RData"))
+load(file = here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res_Mar2022.RData"))
 
 gene_sets_tstat <-
   map(de_res_final, ~{
@@ -1110,9 +1213,6 @@ gsea_plot <-
         legend.text = element_text(size =5), 
         plot.margin = margin() )
 
-
-
-
 ##
 module_gsea %>%
   left_join(colour_df, by = c("termid" = "module")) %>%
@@ -1124,6 +1224,66 @@ module_gsea %>%
 ```
 
 The module clustering correlates well with whether the genes in those modules were upregulated or downregulated in ALS vs control. Despite there not being any control samples in the analysis.
+
+## NEW - correlate MEs with cell-type proportions
+
+```{r}
+de_support <- read_tsv(here::here("data/differential_expression/ALS/ALS_all_differential_expression_support.tsv"))  %>%
+  mutate(duration = as.numeric(duration))
+
+mathys_music_resid <- read_tsv(here::here("data/deconvolution/Mathys_MuSiC_residual_results.tsv"))
+
+conversion_table <- data.frame(short = c("Ast","End", "Mic", "Ex", "Oli", "Per" ),
+                               long = c("Astrocytes", "Endothelial", "Microglia", "Neurons", "Oligos", "Pericytes")
+  )
+
+deconv_df <- mathys_music_resid  %>%
+  select(sample, cell, deconv) %>%
+  left_join(conversion_table, by = c("cell" = "short")) %>%
+  select(sample, cell = long, deconv)
+
+support_deconv <-
+  deconv_df %>% 
+  drop_na() %>%
+  pivot_wider(names_from = cell, values_from = deconv) %>%
+  column_to_rownames(var = "sample")
+
+support_deconv <- support_deconv[ row.names(support_onehot),]
+
+deconv_me <- 
+  trait_assoc(model, return_object = TRUE, support_loc = support_deconv) %>%
+  #left_join(trait_df, by = "trait") %>% 
+  left_join(module_names, by = "module") %>%
+  #filter( !is.na(trait_label)  ) %>%
+  mutate(padj = p.adjust(p.value, method = "bonferroni")) %>%
+  select(module, module_name, n, trait_label = trait, correlation, p.value, padj) %>%
+  arrange(padj)
+
+m2_deconv_plot <- trait_plot(deconv_me, traits = unique(deconv_df$cell))
+
+
+deconv_multiplot <-
+dendro_plot /
+  colour_plot / 
+  m2_mathys_plot /
+  m2_deconv_plot /
+(
+  module_trait_plot("M8","Astrocytes",  traits = support_deconv, "% Astrocytes") |
+  module_trait_plot("M9", "Endothelial", traits = support_deconv,"% Endothelial") 
+  ) /
+( module_trait_plot("M17", "Microglia", traits = support_deconv,"% Microglia") |
+ module_trait_plot(m = "M20", trait = "Neurons", traits = support_deconv, "% Neurons") ) /
+(module_trait_plot(m = "M12", trait = "Oligos", traits = support_deconv, "% Oligodendrocytes") |
+  module_trait_plot("M15", "Pericytes", traits = support_deconv,"% Pericytes")
+) +
+  plot_layout(nrow = 7, ncol = 1, heights = c(2,1,6,6,3,3,3))
+  
+ggsave(deconv_multiplot, filename = "ALS_SC/plots/WGCNA_module_deconv_multiplots.png", width = 6, height = 7, dpi = 600)
+  #&
+ # scale_x_continuous(labels = scales::percent_format(accuracy = 1,trim = FALSE)) & plot_layout(ncol = 3, nrow = 2)) 
+
+ 
+```
 
 
 

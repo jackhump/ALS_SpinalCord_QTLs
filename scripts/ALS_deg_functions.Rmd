@@ -26,6 +26,7 @@ library(tidyverse)
 #library(ggfortify)
 library(patchwork)
 library(pheatmap)
+library(ggrepel)
 #library(gprofiler2)
 #library(enrichR)
 #library(gt)
@@ -66,6 +67,12 @@ createDT <- function(DF, caption="", scrollY=500){
    return(data)
 }
 
+tissue_conversion_table <- tibble(
+  tissue_mono = c("C", "T", "L"),
+  tissue_short = c("CSC", "TSC", "LSC"),
+  tissue_med = c("Cervical", "Thoracic", "Lumbar"),
+  tissue_long = c("Cervical Spinal Cord", "Thoracic Spinal Cord", "Lumbar Spinal Cord") 
+)
 
 rerun <- TRUE
 ```
@@ -84,6 +91,18 @@ Gene Ontology enrichment using clusterProfiler
 #de_res <- de_res_9e
 #names(de_res) <- c("LSC", "CSC", "TSC")
 #de_res <- model_8_final
+setEnrichment <- function(set1, set2, universe = 20000){
+  a = sum(set1 %in% set2)
+  c = length(set1) - a
+  b = length(set2) - a
+  d = universe - length(set2) - c
+  contingency_table = matrix(c(a, c, b, d), nrow = 2)
+  # one-tailed test for enrichment only
+  fisher_results = fisher.test(contingency_table, alternative = "greater")
+  # returns data.frame containing the lengths of the two sets, the overlap, the enrichment ratio (odds ratio) and P value
+  df <- tibble::tibble( set1_length = length(set1), set2_length = length(set2), overlap = a, ratio = fisher_results$estimate, p.value = fisher_results$p.value)
+  return(df)
+}
 
 
 #de_res <- de_res_final
@@ -148,7 +167,7 @@ make_gene_sets <- function(de_res){
   gene_sets_lfc <-
     map(de_res, ~{
       .x <- .x %>%
-        filter(p_value < 0.05) %>%
+        filter(p_value < 0.05, !duplicated(genename) ) %>% ## OOOH
         arrange( desc(log_fc) )
       lfc <- .x$log_fc
       names(lfc) <- .x$genename
@@ -200,7 +219,19 @@ ma_plot <- function(de_res, title = NULL, annotate_by = NULL){
   
 }
 
+# threshold p-values at 1e-16
+# threshold max LFC at 3
 volcano_plot <- function(de_res, title = NULL, subtitle = NULL, annotate_by = NULL, type = "ALS"){
+    if( type == "ALS"){
+    xpos <- 0.5
+    ymax <- 17
+    xlim <- c(-3,3)
+  }else{
+    xpos <- 0.025
+    ymax <- 9
+    xlim <- c(-0.042, 0.042)
+  }
+  
   de_res <- 
     mutate(de_res,
            sig = case_when(
@@ -210,21 +241,14 @@ volcano_plot <- function(de_res, title = NULL, subtitle = NULL, annotate_by = NU
     )) %>%
     mutate(direction = ifelse(log_fc > 0, "up", "down")) %>%
     mutate(log_fc = case_when(
-      log_fc > 3 ~ Inf,
+      log_fc >= 3 ~ Inf,
     log_fc < -3 ~ -Inf,
     TRUE ~ log_fc
     )) %>%
+    mutate(p_value = ifelse(p_value < 10^-(ymax-1), 10^-(ymax-1), p_value) ) %>%
     mutate(class = paste(sig, direction))
   
-  if( type == "ALS"){
-    xpos <- 0.5
-    ymax <- 16.5
-    xlim <- c(-3,3)
-  }else{
-    xpos <- 0.025
-    ymax <- 8.5
-    xlim <- c(-0.042, 0.042)
-  }
+
   
   de_tally <- group_by(de_res, sig, direction, class) %>% tally() %>%
     filter(sig != "non_sig") %>%
@@ -301,6 +325,7 @@ gsea_plot <- function(data){
     padj < 0.05 ~ "*",
     TRUE ~ "."
     )) %>%
+  mutate(ID = fct_rev(ID)) %>%
   #mutate(sig = ifelse(padj < 0.05, "*", "")) %>%
   mutate(NES_label = signif(NES, digits = 2)) %>%
   ggplot(aes( x = tissue, y = ID)) + 
@@ -347,12 +372,71 @@ gsea_box_plots <- function(res, markers, measure = "log_fc"){
 }
 ```
 
+## Load Marker Genes
+
+```{r fig.width = 7, fig.height = 4}
+# Neuroexpresso
+load(here::here("data/misc/neuroexpresso_spinal_cord_human.RData"))
+
+nxp_gsea  <- named_list_to_df(nxp)
+
+## Kelley
+load(here::here("data/markers/kelley_markers.RData"))
+
+kelley_gsea <- named_list_to_df(kelley)
+
+# Panglaodb
+load(here::here("data/markers/PanglaoDB_markers.RData"))
+
+panglao <- named_list_to_df(pg_list) %>%
+  filter(term_id %in% c("Endothelial cells", "Ependymal cells", "Microglia", "Neurons", "Motor neurons", "Oligodendrocytes", "Pericytes", "Astrocytes", "Cholinergic neurons"))
+
+## activation sets
+load(here::here("data/markers/activation_markers.RData"))
+
+act_sets <- c( "Disease-associated microglia", "Disease-associated astrocytes", "Reactive astrocytes - MCAO", "Reactive astrocytes - LPS", "Plaque-induced genes") 
+
+
+activation_gsea <- named_list_to_df(activation_sets) #%>%
+  #filter( term_id %in% act_sets)
+load(here::here("data/markers/Mathys_single_nucleus.RData"))
+
+
+mathys_conversion_table <- data.frame(short = c("Ast","End", "Mic", "Ex", "Oli", "Per" ),
+                               long = c("Astrocytes", "Endothelial", "Microglia", "Neurons", "Oligos", "Pericytes"),
+                               mono = c("A","E","M","N","O","P")
+  )
+
+mathys_gsea <- named_list_to_df(mathys) %>%
+  left_join(mathys_conversion_table, by = c("term_id" = "short") ) %>%
+  mutate(term_id = long) %>%
+  select(term_id, gene) %>%
+  drop_na()
+
+load(here::here("data/markers/Darmanis_single_cell.RData"))
+darmanis_gsea <- named_list_to_df(darmanis)
+
+load(here::here("data/markers/blum_spinal_cord.RData"))
+blum_gsea <- named_list_to_df(blum_markers)
+
+
+load( here::here("data/markers/syngo_1.1.RData"))
+
+syngo_gsea <- named_list_to_df(syngo)
+
+
+```
+
 MSigDB - hallmark gene sets
 
 ```{r}
 hallmark_file <- here::here("data/MSigDB/h.all.v7.2.symbols.gmt")
 hallmarks <- read.gmt(hallmark_file) %>%
-  mutate(term = gsub("HALLMARK|_", " ", term))
+  mutate(term = gsub("HALLMARK|_", " ", term)) %>%
+  mutate(term = gsub("INTERFERON", "IFN", term)) %>%
+  mutate(term = gsub("EPITHELIAL MESENCHYMAL", "E-M", term)) %>%
+  mutate(term = gsub("UNFOLDED PROTEIN RESPONSE", "UPR", term)) %>%
+  mutate(term = str_trim(term))
 
 hallmark_enrichr <- function(gene_set){
   
@@ -397,7 +481,7 @@ hallmark_gsea_plot <- function(df, plot_all = FALSE){
     select(set, ID, NES) %>%
     pivot_wider(names_from = set, values_from = NES) %>%
     rowwise() %>%
-    mutate(mean_nes = mean( c(CSC, LSC, TSC), na.rm = TRUE)) %>%
+    mutate(mean_nes = mean( c(C,L), na.rm = TRUE)) %>%
     arrange( mean_nes) %>%
     mutate(ID = factor(ID, levels = ID)) 
     
@@ -419,7 +503,7 @@ hallmark_gsea_plot <- function(df, plot_all = FALSE){
     to_plot %>%
       filter(ID %in% hallmark_levels$ID) %>%
       mutate(ID = factor(ID, levels = hallmark_levels$ID)) %>%
-      mutate(set = factor(set, levels = c("CSC", "TSC", "LSC"))) %>%
+      mutate(set = factor(set) ) %>% #, levels = c("Cervical", "Thoracic", "Lumbar"))) %>%
     ggplot(aes(x = set, y = ID, label = padj_label, fill = NES)) + 
     geom_tile() + 
     geom_text() +
@@ -428,7 +512,7 @@ hallmark_gsea_plot <- function(df, plot_all = FALSE){
     scale_x_discrete(expand = c(0,0), position = "top") +
     scale_y_discrete(expand = c(0,0)) +
     theme_jh() +
-    labs(subtitle = "MSigDB Hallmark gene set enrichment analysis", x = "", y = "", fill = "NES")
+    labs(subtitle = "MSigDB Hallmark gene set enrichment analysis", x = "", y = "", fill = "NES") + theme(plot.subtitle = element_text(hjust = 0))
 
 }
 
@@ -438,30 +522,290 @@ hallmark_gsea_plot <- function(df, plot_all = FALSE){
 
 # ALS Case vs Control
 
+Updated for March 2022 revisions
+
 ```{r}
-als_res <- load_results(here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res.RData"))
+#load(here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res_Mar2022.RData"))
+#de_res_final <- de_res_mar2022
+#save(de_res_final,file =  here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res_Mar2022.RData"))
+als_res <- load_results(here::here("data/differential_expression/ALS/ALS_Spinal_Cord_de_res_Mar2022.RData"))
+
+# for main figure plots ignore the thoracic
 als_genes <- make_gene_sets(als_res)
+pair_genes <- make_gene_sets(list(C = als_res$CSC, L = als_res$LSC))
 
-```
 
-### overlapping genes
-
-```{r}
+# Table 2 - DEG discovery rates
 map_df( als_res, ~{ 
   sig_all <- filter(.x, adj_p_val < 0.05 ) %>% nrow()
-  sig_strong <- filter(.x, adj_p_val < 0.05 & abs(log_fc) > 1) %>% nrow() 
-  tibble( sig_all, sig_strong)
+  sig_med <- filter(.x, adj_p_val < 0.05 & abs(log_fc) >= 1) %>% nrow()
+  sig_strong <- filter(.x, adj_p_val < 0.05 & abs(log_fc) >= 2) %>% nrow()
+  tibble( sig_all, sig_med, sig_strong)
   }, .id = "tissue")
 
-strong_genes <- map( als_res, ~{ 
-  sig_strong <- filter(.x, adj_p_val < 0.05 & abs(log_fc) > 2) %>% pull(genename)
-  } )
 
-UpSetR::upset(UpSetR::fromList(strong_genes))
-
-intersect(intersect(strong_genes$CSC, strong_genes$TSC), strong_genes$LSC)
 ```
-LYZ, CHIT1 and GPNMB are strongly upregulated in all 3 tissues (lfc > 2)
+
+### overlapping genes - upregulated
+
+ - strong genes - LFC > 1
+
+ - Extreme - Genes with log2 fold change > 2
+
+```{r}
+
+# read in lFCs from full DE and from shared donor DE - restricted to 130 shared donors
+deg_combo <- read_tsv(here::here("ALS_SC/tables/als_control_deg_combined.tsv") )
+shared_donor_df <- read_tsv( here::here("ALS_SC/tables/shared_donor_als_control_deg_combined.tsv"))
+
+strong_genes <- 
+  deg_combo %>% 
+  filter( (cervical.fdr < 0.05 & lumbar.fdr < 0.05) & (cervical.lfc > 1 | lumbar.lfc > 1) ) %>% 
+  pull(genename)
+length(strong_genes)
+
+
+
+if( rerun){
+  gencode <- rtracklayer::import("~/GENCODE/gencode.v30.annotation.gtf.gz")
+  gene_type_df <- tibble(gene_id = gencode$gene_id, gene = gencode$gene_name, type = gencode$gene_type) %>% distinct()
+  write_tsv(gene_type_df,file ="~/GENCODE/gencode.v30.gene.type.tsv.gz" )
+}else{
+  gene_type_df <- read_tsv("~/GENCODE/gencode.v30.gene.type.tsv.gz")
+}
+
+strong_down_genes <- 
+  deg_combo %>% 
+  filter( (cervical.fdr < 0.05 & lumbar.fdr < 0.05) & (cervical.lfc < -1 | lumbar.lfc < -1) ) %>% 
+  mutate(mean.lfc = (cervical.lfc + lumbar.lfc)/2) %>% 
+  arrange((mean.lfc)) %>%
+  left_join(gene_type_df, by = c("genename" = "gene"))
+
+strong_up_genes <-
+  deg_combo %>%
+  filter( (cervical.fdr < 0.05 & lumbar.fdr < 0.05) & (cervical.lfc > 1 | lumbar.lfc > 1) ) %>% 
+  mutate(mean.lfc = (cervical.lfc + lumbar.lfc)/2) %>% 
+  arrange((mean.lfc)) %>%
+  left_join(gene_type_df, by = c("genename" = "gene"))
+
+strong_down_genes %>% group_by(type == "protein_coding") %>% tally()
+strong_up_genes %>% group_by(type == "protein_coding") %>% tally()
+
+
+
+## scatter plot strongest genes!
+strong_up_gene_plot <- function(data, 
+                             highlight = c("GPNMB", "CHIT1", "CCL18",   "DNAJC5B", "CHRNA1", "AQP9")  
+                             ){
+
+  to_plot <- data %>%
+    select(!contains("thoracic")) %>%
+  mutate( gene_set = case_when(
+    (cervical.fdr < 0.05 & lumbar.fdr < 0.05) & (cervical.lfc > 1 & lumbar.lfc > 1) ~ "FDR < 0.05 in both; LFC > 1 in both",
+    (cervical.fdr < 0.05 & lumbar.fdr < 0.05) & (cervical.lfc > 1 & lumbar.lfc <= 1) ~ "FDR < 0.05 in both; LFC > 1 in Cervical",
+       (cervical.fdr < 0.05 & lumbar.fdr < 0.05) & (cervical.lfc <= 1 & lumbar.lfc > 1) ~ "FDR < 0.05 in both; LFC > 1 in Lumbar",
+    ) ) %>%
+    filter(!is.na(gene_set)) %>%
+    mutate(genename = ifelse( genename %in% highlight, genename, "")) 
+  
+  label_df <- to_plot %>% 
+    select(gene_set) %>%
+    drop_na() %>%
+    group_by(gene_set) %>% tally() %>%
+    mutate(x = c(2,0.5,2), 
+           y = c(4.5,2,0.5))
+  
+  # linear model
+  lm_df <- coef(lm(cervical.lfc ~ lumbar.lfc, data = to_plot))
+  lm_string <- paste0("\u03b2 = ", signif(lm_df[2],2) )
+  cor_string <- paste0("\u03c1 = ", signif(cor(to_plot$cervical.lfc, to_plot$lumbar.lfc, method ="pearson"),2) )
+  
+  to_plot %>%
+  ggplot(aes(x = lumbar.lfc, y = cervical.lfc)) + 
+  labs(x = expression(Lumbar~log[2]~fold~change), y =expression(Cervical~log[2]~fold~change), colour = "") +
+  geom_abline(linetype = 2, colour = "gray") +
+  theme_jh() +
+  geom_smooth(method = "lm", se = FALSE, colour = "red") +
+  theme(legend.position = "bottom") +
+  geom_point() +
+  geom_point(aes(colour = gene_set), size = 0.8) +  
+  geom_text_repel( aes(label = genename), 
+                   fontface = "italic", size = 2.5, min.segment.length = 0, force = 10, max.overlaps = 100 ) +
+  scale_colour_manual(values = c("firebrick3","salmon", "peachpuff")) +
+  geom_text(data = label_df, aes(x = x, y = y, label = n, colour = gene_set), show.legend = FALSE, size = 3 ) +
+    xlim(0,3.5) +
+    ylim(0,5) +
+    annotate(geom = "text", x = 0.5, y = 4.5, label = paste0(cor_string, "\n", lm_string), size = 3.5)
+
+}
+
+## EXTREME GENES
+extreme_genes <- map( als_res, ~{ 
+  sig_strong <- filter(.x, adj_p_val < 0.05 & abs(log_fc) > 1) %>%  pull(genename)
+  } ) 
+
+UpSetR::upset(UpSetR::fromList(extreme_genes))
+
+#intersect(intersect(strong_genes$CSC, strong_genes$TSC), strong_genes$LSC)
+# 2 extreme genes in common
+
+extreme_gene_df <- map_df(als_res, ~{filter(.x, genename %in% unlist(extreme_genes) ) })
+
+extreme_gene_table <- 
+  deg_combo %>% 
+  filter(genename %in% unlist(extreme_genes) & !duplicated(genename) ) %>%
+    filter(!is.na(lumbar.lfc) & !is.na(cervical.lfc)) %>%
+   mutate(mean_lfc = (cervical.lfc + lumbar.lfc) / 2  ) %>%
+  arrange(desc(mean_lfc)) %>%
+  mutate(gene = factor(genename, levels = .$genename))
+
+extreme_up_gene_heatmap <- 
+  extreme_gene_df %>%
+  inner_join(extreme_gene_table, by = "genename") %>%
+  filter(gene %in% head(extreme_gene_table, 20)$gene ) %>%
+  #filter(mean_lfc > 0) %>%
+  mutate(gene = fct_rev(gene)) %>%
+  mutate(p_label = ifelse(adj_p_val < 0.05, "*", "") ) %>%
+  left_join(tissue_conversion_table, by = c("tissue" = "tissue_short")) %>%
+  filter(tissue_mono %in% c("C", "L")) %>%
+  ggplot(aes(x = tissue_mono, y = gene)) + 
+  geom_tile(aes(fill = log_fc)) +
+  geom_text(aes(label = p_label), nudge_y = -0.25) +
+  scale_fill_gradient2(low = "white", mid = "#EB7F56", high = "#B61927", limits = c(0,5), na.value = "gray", midpoint = 2   ) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_discrete(expand = c(0,0)) +
+  theme_jh() +
+  labs(fill = expression(log[2]~fold~change), x = "", y = "")  +
+  theme(axis.text.y = element_text(face = 'italic'),
+        legend.key.size = unit(0.5, "cm"),
+        panel.background=element_rect(fill="gray") )
+
+extreme_up_gene_heatmap
+
+```
+LYZ, CHIT1 and GPNMB are strongly upregulated in all 3 tissues (lfc > 2), but also CCL18, DNAJC5B and CHRNA1, HTRA4 all very strong.
+
+## Downregulated gene  sharing
+
+```{r}
+
+strong_down_gene_plot <- function(data, highlight = c("MOBP", "AC009133.6", "LINC00323", "SNORD3C", "ISL1", "MNX1", "MYO1A", "HBD" )
+                             ){
+  to_plot <- data %>%
+    select(!contains("thoracic")) %>%
+  mutate( gene_set = case_when(
+    (cervical.fdr < 0.05 & lumbar.fdr < 0.05) & (cervical.lfc < -1 & lumbar.lfc < -1) ~ "FDR < 0.05 in both; LFC < -1 in both",
+    (cervical.fdr < 0.05 & lumbar.fdr < 0.05) & (cervical.lfc < -1 & lumbar.lfc > -1) ~ "FDR < 0.05 in both; LFC < -1 in Cervical",
+       (cervical.fdr < 0.05 & lumbar.fdr < 0.05) & (cervical.lfc > -1 & lumbar.lfc < -1) ~ "FDR < 0.05 in both; LFC < -1 in Lumbar",
+    ) ) %>%
+    filter(!is.na(gene_set)) %>%
+    mutate(gene = ifelse( genename %in% highlight, genename, "")) 
+  
+  label_df <- to_plot %>% 
+    select(gene_set) %>%
+    drop_na() %>%
+    group_by(gene_set) %>% tally() %>%
+    mutate(x = c(-2,-0.75, -1.5), 
+           y = c(-1.75,-1.5,-0.5))
+  
+  # linear model
+  lm_df <- coef(lm(cervical.lfc ~ lumbar.lfc, data = to_plot))
+  lm_string <- paste0("\u03b2 = ", signif(lm_df[2],2) )
+  cor_string <- paste0("\u03c1 = ", signif(cor(to_plot$cervical.lfc, to_plot$lumbar.lfc, method ="pearson"),2) )
+  
+  to_plot %>%
+  ggplot(aes(x = lumbar.lfc, y = cervical.lfc)) + 
+  labs(x = expression(Lumbar~log[2]~fold~change), y =expression(Cervical~log[2]~fold~change), colour = "") +
+  geom_abline(linetype = 2, colour = "gray") +
+  theme_jh() +
+  geom_smooth(method = "lm", se = FALSE, colour = "red") +
+  theme(legend.position = "bottom") +
+  geom_point() +
+  geom_point(aes(colour = gene_set), size = 0.8) +  
+  geom_text_repel( aes(label = gene), 
+                   fontface = "italic", size = 2.5, min.segment.length = 0, force = 10, max.overlaps = 100 ) +
+  scale_colour_manual(values = c("navy", "dodgerblue", "skyblue" ) ) +
+  geom_text(data = label_df, aes(x = x, y = y, label = n, colour = gene_set), show.legend = FALSE, size = 3 ) +
+    xlim(-2.8,-0.45) +
+    ylim(-2.2,-0.45) +
+    annotate(geom = "text", x = -2.5, y = -0.6, label = paste0(cor_string, "\n", lm_string), size = 3.5)
+
+}
+
+strong_down_gene_plot(deg_combo)
+
+#strong_down_gene_plot(shared_donor_df)
+
+extreme_down_gene_heatmap <- 
+  extreme_gene_df %>%
+  inner_join(extreme_gene_table, by = "genename") %>%
+  filter(gene %in% tail(extreme_gene_table, 20)$gene ) %>%
+  mutate(p_label = ifelse(adj_p_val < 0.05, "*", "") ) %>%
+  left_join(tissue_conversion_table, by = c("tissue" = "tissue_short")) %>%
+  filter(tissue_mono %in% c("C", "L")) %>%
+  ggplot(aes(x = tissue_mono, y = gene)) + 
+  geom_tile(aes(fill = log_fc)  ) +
+  geom_text(aes(label = p_label), nudge_y = -0.25) +
+  scale_fill_gradient2(low = "dodgerblue4", mid = "#4F8FC4", high = "white", limits = c(-3, 0), na.value = "gray", midpoint = -1.5 ) +
+  scale_x_discrete(expand = c(0,0)) +
+  scale_y_discrete(expand = c(0,0)) +
+  theme_jh() +
+  labs(fill = expression(log[2]~fold~change), x = "", y = "")  +
+  theme(axis.text.y = element_text(face = 'italic'),
+        legend.key.size = unit(0.5, "cm"),
+        panel.background=element_rect(fill="gray")
+  )
+
+extreme_down_gene_heatmap
+
+ggsave(plot = extreme_down_gene_heatmap, file = here::here("ALS_SC/plots/downregulated_gene_heatmap.pdf"), width = 2.5, height = 3.5 )
+
+ggsave(plot = extreme_up_gene_heatmap, file = here::here("ALS_SC/plots/upregulated_gene_heatmap.pdf"), width = 2.5, height = 3.5 )
+
+
+#    "sig down" = "#4F8FC4",
+#                                   "sig - strong down" = "dodgerblue4"
+strong_gene_multiplot <- 
+  (
+  strong_up_gene_plot(deg_combo) + labs(title = "Full cohorts") +
+  strong_up_gene_plot(shared_donor_df) + labs(title = "Restricted to shared donors") +
+  extreme_up_gene_heatmap + labs(title = "Top 20 upregulated genes") +
+    plot_layout(guides = "collect")
+  ) / (
+  strong_down_gene_plot(deg_combo) + labs(title = "Full cohorts") +
+  strong_down_gene_plot(shared_donor_df) + labs(title = "Restricted to shared donors") +
+  extreme_down_gene_heatmap + labs(title = "Top 20 downregulated genes") +
+    plot_layout(guides = "collect")
+  ) +
+  plot_layout(nrow = 2, widths = c(2,2,1)) +
+  plot_annotation(tag_levels = "a") &
+    theme(plot.tag = element_text(face = "bold"), legend.position = "bottom", plot.title = element_text(hjust = 0.5)) 
+
+#strong_gene_multiplot
+
+#strong_gene_multiplot
+ggsave(plot = strong_gene_multiplot, filename = here::here("ALS_SC/plots/strong_gene_multiplot.pdf"), width = 9, height = 8 )
+# 109 have LFC > 1 in both CSC and LSC and FDR < 0.05 in both
+# 238 genes have LFC > 1 in at least 1 of 2 but FDR < 0.05 in both
+
+ggsave(plot = strong_up_gene_plot(deg_combo) + guides(colour = FALSE), file =here::here("ALS_SC/plots/shared_upregulated_genes.pdf"), height = 2.5, width = 2.5)#, device = cairo_pdf )
+
+ggsave(plot = strong_down_gene_plot(deg_combo) + guides(colour = FALSE), file =here::here("ALS_SC/plots/shared_downregulated_genes.pdf"), height = 2.5, width = 2.5)#, device = cairo_pdf )
+
+## combo
+both_extremes <- 
+strong_up_gene_plot(deg_combo) +
+  strong_down_gene_plot(deg_combo) +
+  plot_layout(ncol =2) &  
+  guides(colour = FALSE)
+  
+ggsave(plot = both_extremes,  file =here::here("ALS_SC/plots/shared_genes_up_down.pdf"), height = 2.2, width = 4.5, device = cairo_pdf )
+
+
+
+```
+
+
 
 ### Volcano and MA plots
 
@@ -470,99 +814,74 @@ LYZ, CHIT1 and GPNMB are strongly upregulated in all 3 tissues (lfc > 2)
 volcano_multiplot <- 
   volcano_plot(als_res$CSC, "Cervical Spinal Cord", 
                subtitle = "35 Controls vs 139 ALS",
-               annotate_by = c("LYZ", "GPNMB", "CHIT1", "C3", "MOBP")) +
-  volcano_plot(als_res$TSC, "Thoracic Spinal Cord",
-               subtitle = "10 Controls vs 42 ALS",
-               annotate_by = c("LYZ", "GPNMB", "CHIT1", "C3", "MOBP")) +
+               annotate_by = c("LYZ", "GPNMB", "CHIT1", "C3", "MOBP", "MNX1","CCL18")) +
+#  volcano_plot(als_res$TSC, "Thoracic Spinal Cord",
+ #              subtitle = "10 Controls vs 42 ALS",
+ #              annotate_by = c("LYZ", "GPNMB", "CHIT1", "C3", "MOBP", "ISL1", "MNX1")) +
   volcano_plot(als_res$LSC, "Lumbar Spinal Cord",
                subtitle = "32 Controls vs 122 ALS",
-               annotate_by = c("LYZ", "GPNMB", "CHIT1", "C3", "MOBP")) +
+               annotate_by = c("LYZ", "GPNMB", "CHIT1", "C3", "MOBP", "ISL1", "MNX1","CCL18")) +
   plot_layout(nrow = 1)
-volcano_multiplot
-ggsave(plot = volcano_multiplot, filename = here::here("ALS_SC/plots/als_volcano_multiplot.pdf"), width = 7.5, height = 2.2)
+#volcano_multiplot
+ggsave(plot = volcano_multiplot, filename = here::here("ALS_SC/plots/als_volcano_multiplot.pdf"), width = 4.5, height = 2.2)
 ```
 
+## MA plots - annotation broken
 
 ```{r fig.width = 8 , fig.height = 3}
+if(rerun){
 ma_multiplot <- 
-  ma_plot(als_res$CSC, title = "Cervical Spinal Cord") + 
-ma_plot(als_res$LSC, title = "Lumbar Spinal Cord") +
-  ma_plot(als_res$TSC, title = "Thoracic Spinal Cord") +
+  ma_plot(als_res$CSC, title = "Cervical Spinal Cord",annotate_by = c("LYZ", "GPNMB", "CCL18", "C3", "MOBP", "CHIT1")) + 
+ma_plot(als_res$LSC, title = "Lumbar Spinal Cord",annotate_by = c("LYZ", "GPNMB", "CCL18", "C3", "MOBP", "CHIT1")) +
+  ma_plot(als_res$TSC, title = "Thoracic Spinal Cord",annotate_by = c("LYZ", "GPNMB", "CCL18", "C3", "MOBP", "CHIT1")) +
   plot_layout(ncol = 3)
-ggsave(plot =ma_multiplot, filename = here::here("ALS_SC/plots/als_ma_multiplot.pdf"), width = 8, height = 3)
 
+ma_multiplot
+
+ggsave(plot =ma_multiplot, filename = here::here("ALS_SC/plots/als_ma_multiplot.pdf"), width = 8, height = 3)
+}
 
 ```
 
 ## Pathways 
 
 ```{r fig.height = 4, fig.width = 5}
-als_hallmark <- hallmark_gsea(als_genes$lfc)
 
-hallmark_gsea_plot(als_hallmark)
+als_hallmark <- hallmark_gsea(pair_genes$lfc)
 
+h_plot <- hallmark_gsea_plot(als_hallmark) + guides(fill = FALSE) + 
+  theme(plot.subtitle = element_blank(), plot.background = element_blank() )
+h_plot
 #als_hallmark <- hallmark_gsea(als_genes$lfc)
-
-h_plot <- hallmark_gsea_plot(als_hallmark)
-
-h_plot 
+ 
 #hallmark_gsea_plot(als_hallmark, plot_all = TRUE)
 
 ggsave(plot = h_plot, 
-       filename = here::here("ALS_SC/plots/als_hallmark_selected.pdf"), width = 5, height = 4)
+       filename = here::here("ALS_SC/plots/als_hallmark_selected.pdf"), width = 2.5, height = 3.5)
 ```
 
 Supplementary Figure - all hallmark pathway results
 
 ```{r fig.height = 12, fig.width =5 }
-h_plot_all <- hallmark_gsea_plot(als_hallmark, plot_all = TRUE)
+#all_hallmark <- hallmark_gsea(als_genes$lfc)
+h_plot_all <- 
+  hallmark_gsea_plot(als_hallmark, plot_all = TRUE) + labs(subtitle = "")
 
 h_plot_all
 
 ggsave(plot = h_plot_all, 
-       filename = here::here("ALS_SC/plots/als_hallmark_all.pdf"), width = 5, height = 9)
+       filename = here::here("ALS_SC/plots/als_hallmark_all.png"), width = 4, height = 10)
+
+
 ```
 
-
-
-## Load Marker Genes
-
-```{r fig.width = 7, fig.height = 4}
 # Neuroexpresso
-load(here::here("data/misc/neuroexpresso_spinal_cord_human.RData"))
-
-nxp_gsea  <- named_list_to_df(nxp)
-
-## Kelley
-load(here::here("data/markers/kelley_markers.RData"))
-
-kelley_gsea <- named_list_to_df(kelley)
-
-# Panglaodb
-load(here::here("data/markers/PanglaoDB_markers.RData"))
-
-panglao <- named_list_to_df(pg_list) %>%
-  filter(term_id %in% c("Endothelial cells", "Ependymal cells", "Microglia", "Neurons", "Motor neurons", "Oligodendrocytes", "Pericytes", "Astrocytes", "Cholinergic neurons"))
-
-## activation sets
-load(here::here("data/markers/activation_markers.RData"))
-
-act_sets <- c( "Disease-associated microglia", "Disease-associated astrocytes", "Reactive astrocytes - MCAO", "Reactive astrocytes - LPS", "Plaque-induced genes") 
-
-
-activation_gsea <- named_list_to_df(activation_sets) %>%
-  filter( term_id %in% act_sets)
-
-
-```
-
 
 ```{r}
-nxp_gsea_res <- map_df(als_genes$lfc, ~{
+nxp_gsea_res <- map_df(pair_genes$lfc, ~{
   as.data.frame(GSEA(.x, TERM2GENE = nxp_gsea,pvalueCutoff = 1,eps = 0))
 }, .id = "set")
   
-
 gsea_plot(nxp_gsea_res) 
 
 gsea_box_plots(als_res, markers = nxp )
@@ -572,20 +891,87 @@ gsea_box_plots(als_res, markers = nxp )
 
 Using Neuroexpresso markers for Cholinergic Spinal Cord - all 3 tissues show modest downregulation using GSEA.  This is not observed using the Kelley markers - smaller set but not specific to motor neurons.
 
+NEW - Synaptic Gene Ontologies (SynGO)
+
+```{r}
+
+syngo_gsea_res <- map_df(als_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = syngo_gsea,pvalueCutoff = 1,eps = 0))
+}, .id = "set")
+
+
+gsea_plot(syngo_gsea_res) 
+
+gsea_box_plots(als_res, markers = syngo )
+
+```
+
+## NEW - Blum single nucleus spinal cord markers
+
+```{r}
+
+
+blum_gsea_res <- map_df(als_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = blum_gsea,pvalueCutoff = 1,eps = 0))
+}, .id = "set")
+
+gsea_plot(blum_gsea_res)
+
+gsea_box_plots("CSC", blum_markers )
+
+choline <- names(blum_markers)[grepl("cholin", names(blum_markers))]
+
+choline_gsea <- filter(blum_gsea, term_id %in% choline) %>%
+  mutate(term_id = "all_cholinergic")
+
+choline_gsea_res <- map_df(als_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = choline_gsea,pvalueCutoff = 1,eps = 0))
+}, .id = "set")
+
+gsea_plot(choline_gsea_res)
+
+
+```
+
+Blum spinal cord markers are not helpful - only microglia and oligos replicate, none of the neuronal markers do.
+
+## New - Mathys Markers
+
+Top 100 most specific markers between each cluster and every other
+
+```{r}
+
+
+mathys_gsea_res <- map_df(pair_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = mathys_gsea,pvalueCutoff = 1,eps = 0))
+}, .id = "set")
+
+mathys_gsea_plot <- gsea_plot(mathys_gsea_res)
+```
+
+## New - Darmanis Markers
+
+```{r}
+
+darmanis_gsea_res <- map_df(pair_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = darmanis_gsea,pvalueCutoff = 1,eps = 0))
+}, .id = "set")
+
+gsea_plot(darmanis_gsea_res)
+```
+
 
 ## Kelley Markers
 
 ```{r  fig.width = 4, fig.height = 3}
 
-
-kelley_gsea_res <- map_df(als_genes$lfc, ~{
+kelley_gsea_res <- map_df(pair_genes$lfc, ~{
   as.data.frame(GSEA(.x, TERM2GENE = kelley_gsea,pvalueCutoff = 1))
 }, .id = "set")
   
-kelley_gsea_res$ID <- factor(kelley_gsea_res$ID, levels = rev(c("Astrocytes", "Microglia", "Neurons", "Oligos")))
 kelley_gsea_plot <- gsea_plot(kelley_gsea_res) 
 
-kelley_gsea_plot 
+kelley_gsea_plot + labs(title = "Kelley et al")
 
 ```
 
@@ -607,7 +993,7 @@ Neuron upregulation enrichment in CSC is driven by GABA genes.
 
 ```{r}
 
-panglao_gsea_res <- map_df(als_genes$lfc, ~{
+panglao_gsea_res <- map_df(pair_genes$lfc, ~{
   as.data.frame(GSEA(.x, TERM2GENE = panglao,pvalueCutoff = 1))
 }, .id = "set")
   
@@ -619,19 +1005,186 @@ gsea_box_plots(als_res, panglao )
 ```
 
 
+## New Supplementary Plots - compare marker overlap and NES of each cell type across datasets
+
+```{r}
+## Plot NES of all datasets 
+
+
+
+all_gsea <- bind_rows(
+panglao_gsea_res %>% mutate(dataset = "PanglaoDB"),
+nxp_gsea_res %>% mutate(dataset = "Neuroexpresso") ,
+kelley_gsea_res %>% mutate(dataset = "Kelley"),
+darmanis_gsea_res %>% mutate(dataset = "Darmanis"),
+mathys_gsea_res %>% mutate(dataset = "Mathys")
+)
+
+# make ID conversion table
+all_ids <- unique(all_gsea$ID)
+all_ids <- all_ids[order(all_ids)]
+
+conversion_df <- tibble(
+  ID = all_ids,
+  cell = c(
+    rep("Astrocyte", 4),
+    rep("Endothelial", 4),
+    NA,
+    "Neuron",
+    NA,
+    rep("Microglia", 3),
+    rep("Neuron", 3),
+    rep("Oligodendrocyte", 5),
+    NA,
+    rep("Pericyte", 2)
+  )
+)
+
+
+marker_nes_plot <-
+all_gsea %>%
+  left_join(conversion_df, by = "ID") %>%
+  filter(!is.na(cell)) %>%
+ #mutate(dataset = fct_rev(dataset) ) %>%
+  mutate(padj = pvalue) %>%  ##p.adjust(pvalue, method = "bonferroni")) %>%
+  mutate(padj_label = case_when(
+    padj < 0.0001 ~ "***",
+    padj < 0.001 ~ "**",
+    padj < 0.05 ~ "*",
+    TRUE ~ "."
+    )) %>%
+  mutate(NES_label = signif(NES, digits = 2)) %>%
+  ggplot(aes(x = dataset, y = NES)) + 
+  geom_col(aes(fill = NES)) +
+  facet_wrap(~set + cell, nrow = 3) +
+  #coord_flip() +
+  scale_fill_distiller(type = "div", palette = "RdBu", limits = c(-4.2,4.2)) + scale_colour_manual(values = c(NA, "white")) +
+  theme_classic() +
+  geom_text(aes(label = padj_label), nudge_y = 0.1 ) +
+  geom_hline(yintercept = 0) +
+  labs(y = "Normalised Enrichment Score (NES)", x = "") +
+  theme(strip.background = element_blank(), axis.text.x = element_text(angle = 60, hjust = 1),
+        axis.text = element_text(colour = "black"),
+        axis.ticks = element_line(colour = "black"))
+
+ggsave(plot = marker_nes_plot, filename = here::here("ALS_SC/plots/marker_gene_nes_plot.pdf"), width = 8, height =6)
+
+
+## UpSet plot for all marker gene sets used
+all_gsea_genes <- bind_rows(
+panglao %>% mutate(dataset = "PanglaoDB"),
+nxp_gsea %>% mutate(dataset = "Neuroexpresso") ,
+kelley_gsea %>% mutate(dataset = "Kelley"),
+darmanis_gsea %>% mutate(dataset = "Darmanis"),
+mathys_gsea %>% mutate(dataset = "Mathys"),
+activation_gsea %>% mutate(dataset = "Activation")
+)
+
+
+
+all_gsea_gene_list <- 
+  all_gsea_genes %>%
+  left_join(conversion_df, by = c("term_id" = "ID") ) %>%
+  filter(!is.na(cell)) %>%
+  mutate(set = paste(dataset, cell, sep = " ")) %>%
+  split(.$set) %>%
+  map(~{.x$gene}) 
+
+
+## Jaccard index between each set
+mark_expand <- crossing(Var1 = names(all_gsea_gene_list), Var2 = names(all_gsea_gene_list) )
+
+mark_jac_res <- map2_df(mark_expand$Var1,mark_expand$Var2, ~{
+    int <- length(intersect(all_gsea_gene_list[[.x]], all_gsea_gene_list[[.y]]) ) 
+    uni <- length(unique(c(all_gsea_gene_list[[.x]], all_gsea_gene_list[[.y]]) ) ) 
+    jac <- int / uni
+    
+    tibble(x = .x, y = .y, int = int, uni = uni, jac = jac)
+  })
+
+annotation_df <- 
+  tibble(x = names(all_gsea_gene_list) ) %>%
+  distinct() %>%
+  tidyr::separate(col = x, into = c("Dataset", "Cell-type"), sep = " ", remove = FALSE) %>%
+  #select(-Dataset) %>%
+  column_to_rownames("x")
+
+ann_colors = list(
+    "Cell-type" = viridis::viridis(n = 6),
+    "Dataset" = viridis::plasma(n =5)
+)
+names(ann_colors$`Cell-type`) <- unique(annotation_df$`Cell-type`)
+names(ann_colors$Dataset) <- unique(annotation_df$Dataset)
+
+marker_jaccard_plot <-
+  mark_jac_res %>%
+  select(x,y, jac) %>%
+  mutate(jac = ifelse(jac == 1, NA, jac)) %>%
+  pivot_wider(names_from = y, values_from = jac) %>%
+  column_to_rownames("x") %>%
+  pheatmap::pheatmap(annotation_col = annotation_df, 
+                     show_colnames = FALSE, show_rownames = FALSE, 
+                     color = colorRampPalette(c("white", "navy"))(50)
+                     , annotation_colors =ann_colors  )
+marker_jaccard_plot
+
+
+ggsave(plot = marker_jaccard_plot, filename = here::here("ALS_SC/plots/marker_gene_jaccard_plot.pdf"), width = 6, height =4)
+
+
+activation_gene_list <-   
+  activation_gsea %>%
+  split(.$term_id) %>%
+  map(~{.x$gene}) 
+
+act_expand <- crossing(Var1 = names(activation_gene_list), Var2 = names(activation_gene_list) )
+
+act_jac_res <- map2_df(mark_expand$Var1,mark_expand$Var2, ~{
+    int <- length(intersect(activation_gene_list[[.x]], activation_gene_list[[.y]]) ) 
+    uni <- length(unique(c(activation_gene_list[[.x]], activation_gene_list[[.y]]) ) ) 
+    jac <- int / uni
+    
+    tibble(x = .x, y = .y, int = int, uni = uni, jac = jac)
+  })
+
+
+#act_jaccard_plot <-
+  act_jac_res %>%
+  select(x,y, jac) %>%
+  mutate(jac = ifelse(jac == 1, NA, jac)) %>%
+  pivot_wider(names_from = y, values_from = jac) %>%
+  column_to_rownames("x") %>%
+  pheatmap::pheatmap(
+    #annotation_col = annotation_df, 
+                     show_colnames = FALSE, show_rownames = TRUE, 
+                     color = colorRampPalette(c("white", "navy"))(50)
+                     #, annotation_colors =ann_colors  
+                     )
+  
+annotation_df <- tibble(Dataset = act_jac_res$x)
+  
+
+```
+
+
+
 # Activation marker sets
 
 compiled from multiple papers
 
 ```{r}
 
-activation_gsea_res <- map_df(als_genes$lfc, ~{
+
+activation_gsea_res <- map_df(pair_genes$lfc, ~{
   as.data.frame(GSEA(.x, TERM2GENE = activation_gsea,pvalueCutoff = 1))
 }, .id = "set")
 
-activation_gsea_res$ID <- factor(activation_gsea_res$ID, levels = rev(act_sets))
+
+
+#activation_gsea_res$ID <- factor(activation_gsea_res$ID, levels = rev(act_sets))
 
 activation_gsea_plot <- gsea_plot(activation_gsea_res) 
+activation_gsea_plot 
 
 gsea_box_plots(als_res, markers = activation_sets[act_sets])
 
@@ -640,13 +1193,239 @@ gsea_box_plots(als_res, markers = activation_sets[act_sets])
 Combine tissue and activation together
 
 ```{r fig.width = 4, fig.height = 4}
-als_multiplot <- kelley_gsea_plot + 
+als_multiplot <- mathys_gsea_plot + 
   activation_gsea_plot + 
-  plot_layout(ncol =1 , heights = c(4,5), guides = "collect")
+  plot_layout(ncol =2) &
+  guides(fill = FALSE) &
+  theme_jh()
 
-
-ggsave(plot = als_multiplot, filename = here::here("ALS_SC/plots/als_cell_activation.pdf"), width = 4, height = 4)
+als_multiplot
+ggsave(plot = als_multiplot, filename = here::here("ALS_SC/plots/als_cell_activation.pdf"), width = 3, height = 2)
 ```
+
+
+
+## New for Revisions - compare with Oeckl proteomics results
+
+### CSF
+
+```{r}
+load(here::here("other_datasets/Oeckl_Proteomics/Oeckl_Proteomics.RData"))
+csf <- oeckl$csf
+# csf$fdr <- p.adjust(csf$pval, method = "fdr")
+# csf_sig <- filter(csf, fdr < 0.05)
+csf_sig <- oeckl$csf_sig
+
+csf_sig_genes <- str_trim(unlist(strsplit(csf_sig$gene,split = ",")))
+# 35 significant genes
+
+csf_sig <- filter(csf_sig, !grepl(",", csf_sig$gene))
+# 30 non-overlapping genes
+
+filter(als_res$CSC, genename %in% csf_sig$gene) %>% filter(adj_p_val < 0.05)
+filter(als_res$LSC, genename %in% csf_sig$gene) %>% filter(adj_p_val < 0.05)
+filter(als_res$TSC, genename %in% csf_sig$gene) %>% filter(adj_p_val < 0.05)
+
+setEnrichment(set1 = filter(als_res$CSC, adj_p_val < 0.05) %>% pull(genename),
+              set2 = csf_sig$gene,
+              universe = nrow(als_res$CSC) 
+              )
+```
+
+32 proteins (35 genes) differentially expressed in ALS CSF, of which 17 are significant in CSC, 11 in LSC and 1 in TSC. GPNMB is top in all 3.
+
+
+### Spinal Cord proteomics
+
+```{r}
+sp <- oeckl$sp
+#sp$fdr <- p.adjust(sp$pval, method = "fdr")
+
+
+#sp_sig <- filter(sp, fdr < 0.05)
+sp_sig <- oeckl$sp_sig
+sp_sig_genes <- unlist(strsplit(sp_sig$gene,split = ";"))
+# 297 genes
+table( !grepl(";", sp_sig$gene) )
+# 287 non-overlapping genes
+sp_sig <- filter(sp_sig, !grepl(";", sp_sig$gene))
+
+filter(als_res$CSC, genename %in% sp_sig_genes) %>% filter(adj_p_val < 0.05)
+# 158 overlap
+#matrix(c(4455, 112, 287, nrow(als_res$CSC) ), nrow = 2 )
+
+setEnrichment(set1 = filter(als_res$CSC, adj_p_val < 0.05) %>% pull(genename),
+              set2 = sp_sig$gene,
+              universe = nrow(als_res$CSC) 
+              )
+
+
+
+filter(als_res$LSC, genename %in% sp_sig_genes) %>% filter(adj_p_val < 0.05)
+filter(als_res$TSC, genename %in% sp_sig_genes) %>% filter(adj_p_val < 0.05)
+
+
+csc_prot <- 
+  filter(als_res$CSC, genename %in% c(sp_sig_genes, csf_sig_genes) ) %>% 
+  filter(adj_p_val < 0.05) %>%
+  left_join(sp_sig, by = c("genename" = "gene") ) %>%
+  rename(sp_lfc = lfc, sp_p = pval) %>%
+  left_join(csf_sig, by = c("genename" = "gene")) %>%
+  rename(csf_lfc = lfc, csf_p = pval) %>%
+  mutate(darmanis = darmanis_gsea$term_id[match(genename, darmanis_gsea$gene)]) %>%
+  mutate(mathys = mathys_gsea$term_id[match(genename, mathys_gsea$gene)]) %>%
+  mutate(kelley = kelley_gsea$term_id[match(genename, kelley_gsea$gene)]) %>%
+  mutate(panglao = panglao$term_id[match(genename, panglao$gene)]) %>%
+   mutate(nxp = nxp_gsea$term_id[match(genename, nxp_gsea$gene)])
+
+```
+
+292 peptides (297 unique genes) are differentially expressed between ALS and control in spinal cord tissue, of which 158, 107 and 19 are DEGs in spinal cord RNA-seq 
+
+of the 158 CSC overlapping genes, 16 (91%) go in the opposite direction
+
+## compare fold changes
+
+```{r}
+#library(ggrepel)
+#library(patchwork)
+
+compare_rna_prot_plot <- function(prot, rna, mytitle, highlight = c("CHIT1", "GPNMB", "IQGAP2", "LYZ", "MOBP", "PEX5L", "APOE", "SERPINA3", "UCHL1"), cross_zero = TRUE){
+  to_plot <- 
+  inner_join(prot, rna, by = c("gene"= "genename"), suffix = c(".prot", ".gene") ) %>%
+  filter(adj_p_val < 0.05) 
+  print(table(rna = to_plot$lfc > 0, prot = to_plot$log_fc > 0))
+  p <- to_plot %>%
+  ggplot(aes(y = lfc, x = log_fc, label = gene)) +
+  geom_point(size = 1, colour = "black") +
+  geom_point(size = 0.8, colour = "purple") +
+  geom_text_repel(data = filter(to_plot, gene %in% highlight),max.overlaps = 10, size = 2.5, fontface = "italic", min.segment.length = unit(x = 0, units = "lines")) + 
+    labs(y = expression(~log[2]~"(Protein)"), x = expression(~log[2]~"(mRNA)"), title = mytitle) +
+  geom_abline(slope = 1, intercept = 0, linetype = 3) +
+  theme_jh() +
+  theme(panel.border = element_blank(), 
+        axis.ticks = element_line(colour = "black"),
+        plot.title = element_text(hjust = 0, size = 8)
+        ) +
+    scale_x_continuous(n.breaks = 3, breaks = waiver()) +
+    scale_y_continuous(n.breaks = 3, breaks = waiver())
+  
+  if(cross_zero == TRUE){
+    p <- p +  geom_hline(yintercept = 0, linetype = 3) + geom_vline(xintercept = 0, linetype = 3)
+  }
+  return(p)
+}
+
+## main figure!
+#library(ggrepel)
+cervical_compare_plot <- 
+  compare_rna_prot_plot(prot = sp_sig, rna = als_res$CSC, "Spinal Cord" ) +
+compare_rna_prot_plot(prot = csf_sig, rna = als_res$CSC, "Cerebrospinal Fluid", cross_zero = FALSE) + 
+  plot_layout(ncol = 2)
+
+cervical_compare_plot 
+
+ ggsave(cervical_compare_plot, filename = here::here("ALS_SC/plots/cervical_rna_protein_compare.pdf"), width = 4.5, height = 2.2)
+
+
+
+## supplement
+lumbar_compare_plot <-
+  compare_rna_prot_plot(prot = sp_sig, rna = als_res$LSC, "Spinal Cord") +
+compare_rna_prot_plot(prot = csf_sig, rna = als_res$LSC, "Cerebrospinal Fluid") + 
+  plot_layout(ncol = 2)
+
+
+ggsave(lumbar_compare_plot, filename = here::here("ALS_SC/plots/lumbar_rna_protein_compare.pdf"), width = 6, height = 3)
+# put Cervical in main figure
+
+# put Lumbar in supplement
+
+# make table with fold changes of protein and RNA
+
+rna_prot_df <- bind_rows(
+  csf_sig %>% 
+    mutate(cohort = "CSF_protein"),
+  sp_sig %>% mutate(cohort = "SC_protein"),
+  als_res$CSC %>% filter(adj_p_val < 0.05) %>% 
+    select(gene = genename, lfc = log_fc, pval = p_value) %>%
+    mutate(cohort = "Cervical_mRNA"),
+  als_res$LSC %>% filter(adj_p_val < 0.05) %>% 
+    select(gene = genename, lfc = log_fc, pval = p_value) %>% 
+    mutate(cohort = "Lumbar_mRNA")
+) %>%
+  filter( gene %in% .$gene[duplicated(.$gene)] & gene %in% c(csf_sig$gene, sp_sig$gene) )
+
+
+rna_prot_df_wide <- rna_prot_df  %>% 
+  pivot_wider(names_from = cohort, 
+              values_from = c(lfc, pval), 
+              names_glue =  "{cohort}.{.value}", names_sort = TRUE, 
+              ) %>%
+  select(gene, starts_with("SC"), starts_with("CSF"), starts_with("Cervical"), starts_with("Lumbar") ) %>%
+  arrange((SC_protein.pval))
+
+View(rna_prot_df_wide)
+
+
+write_tsv(rna_prot_df_wide, file = here::here("ALS_SC/tables/oeckl_protein_comparison.tsv"))
+```
+
+
+
+## New - run GSEA with markers using Oeckl Spinal Cord proteomics
+
+```{r}
+rank_oeckl <- function(data, p = 0.05){
+  genes <- data %>% 
+    filter( !grepl(";|,", gene), !is.na(lfc), pval < p ) %>%
+    filter(!duplicated(gene) ) %>%
+    select(gene,lfc) %>%
+    distinct() %>%
+    arrange(desc(lfc)) 
+  ranked <- setNames(genes$lfc, genes$gene)
+  
+}
+
+nxp_compare <- 
+nxp_gsea %>%
+  left_join( inner_join(sp, csf, by = "gene",suffix = c(".sp", ".csf") ),
+             by = "gene") 
+
+nxp_compare %>%
+  filter(pval.sp < 0.05) %>%
+  ggplot(aes(x = term_id, y = lfc.sp)) + geom_jitter(aes(colour = pval.sp < 0.05), width = 0.25) +
+  geom_text_repel( aes(label = gene))
+
+nxp_compare %>%
+    filter(pval.csf < 0.05) %>%
+  ggplot(aes(x = term_id, y = lfc.csf)) + geom_jitter(aes(colour = pval.csf < 0.05), width = 0.25) +
+  geom_text_repel(data = filter(nxp_compare, pval.csf < 0.05), aes(label = gene))
+
+
+sp_ranked <- rank_oeckl(sp, p = 1) # 1201 genes
+csf_ranked <- rank_oeckl(csf, p = 1) #392 genes
+
+oeckl_nxp_gsea_res <- map_df(list("CSF" = csf_ranked, "Spinal Cord" = sp_ranked ), ~{
+  as.data.frame(GSEA(.x, TERM2GENE = nxp_gsea,pvalueCutoff = 1,eps = 0))
+}, .id = "set")
+  
+gsea_plot(oeckl_nxp_gsea_res) 
+
+oeckl_kelley_gsea_res <- map_df(list("CSF" = csf_ranked, "Spinal Cord" = sp_ranked ), ~{
+  as.data.frame(GSEA(.x, TERM2GENE = kelley_gsea,pvalueCutoff = 1,eps = 0))
+}, .id = "set")
+  
+gsea_plot(oeckl_kelley_gsea_res) 
+
+oeckl_activation_gsea_res <- map_df(list("CSF" = csf_ranked, "Spinal Cord" = sp_ranked ), ~{
+  as.data.frame(GSEA(.x, TERM2GENE = activation_gsea,pvalueCutoff = 1,eps = 0))
+}, .id = "set")
+
+gsea_plot(oeckl_activation_gsea_res) 
+```
+
+
 
 
 
@@ -654,22 +1433,22 @@ ggsave(plot = als_multiplot, filename = here::here("ALS_SC/plots/als_cell_activa
 
 
 ```{r fig.height = 2.5, fig.width = 8}
-dur_res <- load_results(here::here("data/differential_expression/ALS/Model_8_limma_res.RData"))
+dur_res <- load_results(here::here("data/differential_expression/ALS/Model_8_limma_res_Mar2022.RData"))
 dur_genes <- make_gene_sets(dur_res)
 dur_genes$lfc$TSC <- NULL
 
-
+dur_anno <-  c("CHIT1", "C3", "GPNMB", "CHRNA1", "PON3", "DEFA1","MNX1")
 duration_volcano <- 
   volcano_plot(dur_res$CSC, title = "Cervical Spinal Cord", subtitle = "139 ALS",  
-               annotate_by = c("CHIT1", "C3", "LYZ", "GPNMB", "MOBP", "GFAP"), type = "duration") +
-  volcano_plot(dur_res$TSC, title = "Thoracic Spinal Cord", subtitle = "42 ALS",  
-               annotate_by = c("CHIT1", "C3", "LYZ", "GPNMB", "MOBP", "GFAP"),type = "duration") + 
+               annotate_by = dur_anno, type = "duration") +
+#  volcano_plot(dur_res$TSC, title = "Thoracic Spinal Cord", subtitle = "42 ALS",  
+#               annotate_by = c("CHIT1", "C3", "LYZ", "GPNMB", "MOBP", "GFAP"),type = "duration") + 
   volcano_plot(dur_res$LSC, title = "Lumbar Spinal Cord", subtitle = "122 ALS", 
-               annotate_by = c("CHIT1", "C3", "LYZ", "GPNMB", "MOBP", "GFAP"),type = "duration") 
+               annotate_by = dur_anno,type = "duration") 
 
-duration_volcano 
+#duration_volcano 
 
-ggsave(plot = duration_volcano, filename = here::here("ALS_SC/plots/duration_volcano.pdf"), width = 7.5, height = 2.2)
+ggsave(plot = duration_volcano, filename = here::here("ALS_SC/plots/duration_volcano.pdf"), width = 5, height = 2.2)
 
 
 ```
@@ -691,16 +1470,8 @@ dur_kelley_gsea_res <- map_df(dur_genes$lfc, ~{
   as.data.frame(GSEA(.x, TERM2GENE = kelley_gsea,pvalueCutoff = 1, minGSSize = 5, eps = 0))
 }, .id = "set")
   
-
 gsea_box_plots(dur_res, kelley)
 
-dur_activation_plot <- 
-  gsea_plot(dur_activation_gsea_res)  + gsea_plot(dur_kelley_gsea_res) + 
-  plot_layout(ncol = 1, guides = "collect", heights = c(5,4))
-
-dur_activation_plot
-
-ggsave(plot = dur_activation_plot, filename = here::here("ALS_SC/plots/dur_cell_activation.pdf"), width = 4, height = 4)
 
 
 dur_panglao_gsea_res <- map_df(dur_genes$lfc, ~{
@@ -716,6 +1487,27 @@ dur_nxp_gsea_res <- map_df(dur_genes$lfc, ~{
 }, .id = "set")
   
 gsea_plot(dur_nxp_gsea_res) 
+
+
+dur_mathys_gsea_res <- map_df(dur_genes$lfc, ~{
+  as.data.frame(GSEA(.x, TERM2GENE = mathys_gsea,pvalueCutoff = 1, minGSSize = 5, eps = 0))
+}, .id = "set")
+  
+dur_mathys_gsea_plot <- gsea_plot(dur_mathys_gsea_res)
+
+
+dur_activation_gsea_plot <- gsea_plot(dur_activation_gsea_res) 
+
+dur_gsea_multiplot <- 
+  dur_mathys_gsea_plot +
+  dur_activation_gsea_plot +
+  plot_layout(ncol = 2, guides = "collect") #&
+ # guides(fill = "none")
+
+dur_gsea_multiplot
+
+ggsave(plot = dur_gsea_multiplot, filename = here::here("ALS_SC/plots/dur_cell_activation.pdf"), width = 4, height = 2)
+
 
 ```
 

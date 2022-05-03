@@ -55,7 +55,7 @@ gene_plot <- function(mygene, counts, meta,
                       return_data = FALSE){
   require(dplyr)
   require(ggplot2)
-  
+  require(stringr)
   # convert to short form
   x <- choice_to_short(x)
   y <- choice_to_short(y)
@@ -69,12 +69,33 @@ gene_plot <- function(mygene, counts, meta,
     ylab <- "log2(TPM + 0.01)"
   }
   
-  if(!mygene %in% row.names(counts )){return( "Gene not found!")}
-  stopifnot(mygene %in% row.names(counts) )
+  ## allow multiple genes
+  if(grepl(",", mygene)){
+    mygene <- unlist(str_split(mygene, ","))
+    facet <- paste0("gene + ", facet )
+  }
+  
+  
+  if( all(mygene != "") ){
+  # return closest match to gene
+    all_genes <- row.names(counts)
+    if( ! all(mygene %in% all_genes) ){
+      mygene <- all_genes[ grepl(mygene, all_genes, ignore.case = TRUE ) ]
+      if(length(mygene) != 1){
+        message( "Gene not found!")
+        return(NULL)
+      }
+      message(mygene)
+    }
+  }else{
+    mygene <- NA
+  }
+
+  
   
   df <- as.data.frame(t(counts[ mygene, ])) %>%
-    tibble::rownames_to_column(var = "rna_id")
-  names(df)[2] <- "TPM"
+    tibble::rownames_to_column(var = "rna_id") %>%
+    tidyr::pivot_longer(names_to = "gene", values_to = "TPM", cols = !c(rna_id) )
   df <- df %>%
     dplyr::mutate( TPM = as.numeric(TPM)) %>%
     dplyr::left_join(meta, by = "rna_id") %>%
@@ -130,6 +151,39 @@ gene_plot <- function(mygene, counts, meta,
   
   return(plot)
 }
+
+set_df <- tibble(
+  test = c("CHIT1", "APOE", "APOC1")
+)
+
+set_plot <- function(sets = kelley,
+         tissues = c("Cervical","Lumbar"), type = "de"){
+  # get log_fc values from DE or duration results
+  if(type == "de"){
+    res <- de_res
+  }
+  if(type == "dur"){
+    res <- dur_res
+  }
+  
+  set_df <- map_df(sets, ~{tibble(gene = .x) }, .id = "set")
+  
+  df <- 
+    map_df(res, ~{.x %>% filter(genename %in% set_df$gene)}, .id = "tissue") %>%
+    filter(tissue %in% tissues) %>%
+    left_join(set_df, by = c("genename" = "gene"))
+  
+  df %>%
+    ggplot(aes(x = log_fc, y = set)) + 
+    geom_jitter(size = 0.8, aes(colour = -log10(p_value)) ) + 
+    facet_wrap(~tissue, ncol = 1) +
+    xlim(-2,4) +
+    geom_vline(xintercept = 0, linetype = 3) +
+    theme_jh()
+  
+}
+
+set_plot()
 
 #gene_plot("MOBP", x = "% Oligodendrocytes", colourby = "disease_duration", tissues = "Cervical", boxplot = TRUE, corline = TRUE, stats = TRUE)
 

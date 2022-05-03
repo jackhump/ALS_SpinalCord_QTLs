@@ -81,8 +81,25 @@ metadata$`C9orf72 status` <- factor(metadata$disease_c9, levels = c("Control", "
 
 metadata$RIN <- metadata$rin
 metadata$`disease duration` <- metadata$disease_duration
+metadata$site_of_motor_onset <- gsub(" ", "\n",metadata$site_of_motor_onset )
 
-save(metadata, tpm_df, file = here::here("tpm_metadata.RData"))
+## add in de and duration results
+
+load("../../NYGC_ALS/data/differential_expression/ALS/ALS_Spinal_Cord_de_res_Mar2022.RData")
+de_res <- de_res_final
+de_res$TSC <- NULL
+names(de_res) <- c("Cervical", "Lumbar")
+
+dur_res <- load("../../NYGC_ALS/data/differential_expression/ALS/Model_8_limma_res_Mar2022.RData")
+dur_res <- de_res_final
+dur_res$TSC <- NULL
+names(dur_res) <- c("Cervical", "Lumbar")
+
+
+
+save(metadata, tpm_df, de_res, dur_res, file = here::here("tpm_metadata.RData"))
+
+
 
 stop()
 

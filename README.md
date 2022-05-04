@@ -31,7 +31,7 @@ Whole genome sequencing data - dbGAP (in progress).
 
 ## Rmarkdown workbooks written for the project.
 
-Most workbooks are presented as raw .Rmd (in `scripts/` and knitted HTML files (in `html/`).
+Workbooks are available as [RMarkdown files](https://github.com/jackhump/ALS_SpinalCord_QTLs/tree/master/scripts). Knitted HTMLs can be browsed with the links below.
 
 ### Data QC and setup
 
@@ -43,7 +43,7 @@ WGS QC pipeline hosted [here](https://github.com/jackhump/WGS-QC-Pipeline)
  
 ### Differential expression
 
-[Running differential expression](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_differential_expression.html)
+[Running differential expression](https://github.com/jackhump/ALS_SpinalCord_QTLs/blob/master/scripts/ALS_differential_expression.Rmd)
 
 [Volcano plots, GSEA, marker gene overlaps](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_deg_functions.html)
 
@@ -51,7 +51,7 @@ WGS QC pipeline hosted [here](https://github.com/jackhump/WGS-QC-Pipeline)
 
 ### Co-expression networks
 
-[Building co-expression networks, associations with traits and GO](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_WGCNA.html)
+[Building co-expression networks, associations with traits and GO](https://jackhump.github.io/ALS_SpinalCord_QTLs/blob/master/scripts/ALS_WGCNA.Rmd)
 
 ### Quantitative Trait Loci (QTLs)
 

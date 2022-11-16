@@ -10,7 +10,7 @@ Jack Humphrey 2019-2022
 
 ## Shiny App
 
-[Launch Shiny app](https://jackhumphrey.shinyapps.io/als_spinal_cord_browser/)
+[Launch Shiny app](https://rstudio-connect.hpc.mssm.edu/als_spinal_cord_browser/)
 
 [source code](https://github.com/jackhump/ALS_SpinalCord_QTLs/blob/master/als_spinal_cord_browser/app.R)
 

@@ -1,6 +1,6 @@
 
 theme_jh <- function () { 
-  theme_bw(base_size=12) %+replace% 
+  theme_bw( base_size = 14) %+replace% 
     theme(
       panel.grid = element_blank(),
       strip.background = element_blank(),
@@ -13,7 +13,7 @@ theme_jh <- function () {
       plot.background = element_rect(fill="white", colour=NA), 
       legend.background = element_rect(fill="transparent", colour=NA),
       legend.key = element_rect(fill="transparent", colour=NA), 
-      plot.title = element_text(face = "bold.italic", size = 14),
+      plot.title = element_text(face = "bold.italic", size = 16),
       axis.line.y = element_line(), strip.text.x = element_text(face = "bold", margin = margin(t = 2,r = 0,b = 2,l=0))
     )
 }
@@ -21,7 +21,7 @@ theme_jh <- function () {
 # match abbreviated labels to long form labels
 choice_df <- tibble::tibble(
   short =  c("TPM","disease","C9orf72 status","mutations","site_of_motor_onset","age_rounded","disease_duration","sex","% Astrocytes", "% Endothelial", "% Neurons", "% Microglia", "% Oligodendrocytes", "% Pericytes","RIN","seq_platform", "tissue"),
-  long =  c("TPM","Disease", "C9orf72 status", "Known ALS mutations", "Site of motor symptom onset","Age at death (decade)","Disease duration (months)","Sex","% Astrocytes", "% Endothelial", "% Neurons", "% Microglia", "% Oligodendrocytes", "% Pericytes","RIN","Sequencing platform", "Region" )
+  long =  c("TPM","Disease", "C9orf72 status", "Known ALS mutations", "Site of motor symptom onset","Age at death (decade)","Disease duration (years)","Sex","% Astrocytes", "% Endothelial", "% Neurons", "% Microglia", "% Oligodendrocytes", "% Pericytes","RIN","Sequencing platform", "Region" )
 )
 
 choice_to_short <- function(x){
@@ -56,6 +56,8 @@ gene_plot <- function(mygene, counts, meta,
   require(dplyr)
   require(ggplot2)
   require(stringr)
+  
+
   # convert to short form
   x <- choice_to_short(x)
   y <- choice_to_short(y)
@@ -69,11 +71,20 @@ gene_plot <- function(mygene, counts, meta,
     ylab <- "log2(TPM + 0.01)"
   }
   
-  ## allow multiple genes
-  if(grepl(",", mygene)){
-    mygene <- unlist(str_split(mygene, ","))
-    facet <- paste0("gene + ", facet )
+  # if not plotting TPM then doesn't matter if gene is empty
+  if( (y == "TPM" | x == "TPM" ) & (is.null(mygene) | is.na(mygene) | mygene == "")  ){
+    return(ggplot() + theme_void() )
+  } 
+  
+  # set placeholder gene if neither axis is 
+  if( y != "TPM" & x != "TPM"){
+    mygene <- "CHIT1"
   }
+  # ## allow multiple genes
+  # if(grepl(",", mygene)){
+  #   mygene <- unlist(str_split(mygene, ","))
+  #   facet <- paste0("gene + ", facet )
+  # }
   
   
   if( all(mygene != "") ){
@@ -83,12 +94,14 @@ gene_plot <- function(mygene, counts, meta,
       mygene <- all_genes[ grepl(mygene, all_genes, ignore.case = TRUE ) ]
       if(length(mygene) != 1){
         message( "Gene not found!")
-        return(NULL)
+        return(ggplot() + theme_void() )
       }
       message(mygene)
     }
   }else{
     mygene <- NA
+    message( "Gene not found!")
+    return(ggplot() + theme_void() )
   }
 
   
@@ -152,7 +165,31 @@ gene_plot <- function(mygene, counts, meta,
   return(plot)
 }
 
-set_df <- tibble(
+## table making!
+gene_table <- function(mygene, table, counts){
+  # check gene against gene_list 
+  gene_list <- row.names(counts)
+  if( ! all(mygene %in% gene_list) ){
+    mygene <- gene_list[ grepl(mygene, gene_list, ignore.case = TRUE ) ]
+    print( mygene)
+  }
+  if( length(mygene) != 1 ){
+    return(data.frame() )
+  }
+  # make table
+  out_table <- purrr::map_df(table, ~{
+    .x %>% filter(genename == mygene) 
+    }, .id = "Region"
+  ) %>%
+    # formatting
+    mutate( log_fc = signif(log_fc, 2), p_value = signif(p_value, 2), adj_p_val = signif(adj_p_val, 2)) %>%
+    select(Region, `log2 fold change` = log_fc, `P value` = p_value, `FDR` = adj_p_val)
+
+  return(out_table)
+}
+
+
+set_df <- tibble::tibble(
   test = c("CHIT1", "APOE", "APOC1")
 )
 
@@ -183,7 +220,7 @@ set_plot <- function(sets = kelley,
   
 }
 
-set_plot()
+#set_plot()
 
 #gene_plot("MOBP", x = "% Oligodendrocytes", colourby = "disease_duration", tissues = "Cervical", boxplot = TRUE, corline = TRUE, stats = TRUE)
 

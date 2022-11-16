@@ -25,22 +25,33 @@ ui <- navbarPage(
                          verticalLayout(fluid=TRUE,
                                         textInput(inputId = "de_gene",value = "CHIT1", label = "Pick a gene"),
                                         actionButton(inputId = "de_log_button", label = "log scale" )
+                                        
                          )
                      ),
-                     # Show a plot of the generated distribution
                      mainPanel(
-                         h2(tags$i(textOutput(outputId = "gene_title", inline = TRUE))),
-                         h4("Differential Expression - ALS vs Control"),
-                         plotOutput("dePlot"),
-                         h4("Association with disease duration (months)"),
-                         plotOutput("durPlot")
-                         #downloadButton("downloadPlot", label = "Save plot", class = NULL)
+                         fixedRow(
+                             column(5,
+                                    #h2(tags$i(textOutput(outputId = "gene_title", inline = TRUE))),
+                                    h5(style="text-align: center;",
+                                       "ALS vs Control Differential Expression"),
+                                    plotOutput("dePlot"),
+                                    
+                                    DT::dataTableOutput('deTable') 
+                             ),
+                             column(5,
+                                    h5(style="text-align: center;", "Association with ALS duration"),
+                                    plotOutput("durPlot"),
+                                    
+                                    DT::dataTableOutput('durTable')
+                             )
+                             #downloadButton("downloadPlot", label = "Save plot", class = NULL)
+                         )
                      )
                  )
              )
                                         
              ),
-    tabPanel("Gene sets"),
+   # tabPanel("Gene sets"),
     tabPanel("Custom Plotting",
             #tags$style(type="text/css", href = "layout.css"),
             div(
@@ -68,25 +79,25 @@ ui <- navbarPage(
              )
             )
     ),
-    tabPanel("About",
-             
-             p("written by Jack Humphrey."),
-             p(tags$a(href="https://zenodo.org/record/6385747", "All counts, TPMs and metadata")),
-             p(tags$a(href="https://www.medrxiv.org/content/10.1101/2021.08.31.21262682v1", "Preprint describing results", target = "_blank")),
-             p(tags$a(href="https://github.com/jackhump/ALS_SpinalCord_QTLs/tree/master/als_spinal_cord_browser", "Source code.", target = "_blank") )
-             
-             )
+   tabPanel("About",
+            div(
+                p("Written by ", tags$a(href="https://jackhump.github.io", "Jack Humphrey.") ),
+                p("All data and metadata hosted on ", tags$a(href="https://zenodo.org/record/6385747", "Zenodo.")),
+                p("Preprint describing methods and results published on ", tags$a(href="https://www.medrxiv.org/content/10.1101/2021.08.31.21262682v1", "medRxiv.", target = "_blank")),
+                p("Source code hosted on ", tags$a(href="https://github.com/jackhump/ALS_SpinalCord_QTLs/tree/master/als_spinal_cord_browser", "GitHub.", target = "_blank"),
+                  " Please raise any feature suggestions or bugs as an issue.")
+            )
+   )
 )
 
 # Define server logic required to draw plot
-server <- function(input, output) {
-    
+server <- function(input, output, session) {
     ## toggle buttons
     
     boxplot <- reactiveVal(FALSE)
     corline <- reactiveVal(FALSE)
     stats <- reactiveVal(FALSE)
-    logs <- reactiveVal(FALSE)
+    logs <- reactiveVal(TRUE)
     
     
     observeEvent(input$boxplot_button, {
@@ -102,6 +113,10 @@ server <- function(input, output) {
     })
     
     observeEvent(input$log_button, {
+        logs(!logs())
+    })
+    
+    observeEvent(input$de_log_button, {
         logs(!logs())
     })
     
@@ -131,7 +146,7 @@ server <- function(input, output) {
                   tissues = c("Cervical", "Lumbar"), 
                   boxplot = TRUE, 
                   corline = FALSE, 
-                  stats = TRUE, 
+                  stats = FALSE, 
                   log = logs() )  
     })
     
@@ -145,10 +160,25 @@ server <- function(input, output) {
                   tissues = c("Cervical", "Lumbar"), 
                   boxplot = FALSE, 
                   corline = TRUE, 
-                  stats = TRUE, 
+                  stats = FALSE, 
                   log = logs() )  
     })
     
+    output$deTable <- DT::renderDataTable(#rownames = FALSE,
+        gene_table(mygene = input$de_gene,
+                   table = de_res, counts = tpm_df ),
+        options = list(paging = FALSE, searching = FALSE, 
+                       columnDefs = list(list(className = 'dt-center', targets = 0:4)),
+                       ordering = FALSE, lengthChange= FALSE, scrollX = FALSE, scrollY = FALSE, info = FALSE)
+    )
+    
+    output$durTable <- DT::renderDataTable(#rownames = FALSE,
+        gene_table(mygene = input$de_gene,
+                   table = dur_res, counts = tpm_df ),
+        options = list(paging = FALSE, searching = FALSE, ordering = FALSE, 
+                       columnDefs = list(list(className = 'dt-center', targets = 0:4)),
+                       lengthChange= FALSE, scrollX = FALSE, scrollY = FALSE, info = FALSE)
+    )
     
     output$downloadPlot <- downloadHandler(
         filename = function() { 'plot.pdf' },

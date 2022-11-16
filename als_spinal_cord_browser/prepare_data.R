@@ -1,7 +1,7 @@
 # prepare shared data for visualisation
 library(tidyverse)
 
-inFolder <- "../NYGC_ALS/ALS_SC/sharing"
+inFolder <- "../../NYGC_ALS/ALS_SC/sharing"
 #gene_meta <- read_tsv()
 tissues <- c("Cervical_Spinal_Cord", "Lumbar_Spinal_Cord", "Thoracic_Spinal_Cord")
 
@@ -95,11 +95,14 @@ dur_res <- de_res_final
 dur_res$TSC <- NULL
 names(dur_res) <- c("Cervical", "Lumbar")
 
+#gene_list1 <- purrr::map(dur_res, "genename") %>% unlist() %>% unique()
+#gene_list2 <- purrr::map(de_res, "genename") %>% unlist() %>% unique()
 
+gene_list <- row.names(tpm_df)
 
-save(metadata, tpm_df, de_res, dur_res, file = here::here("tpm_metadata.RData"))
+save(metadata, tpm_df, de_res, dur_res, file = ("tpm_metadata.RData"))
 
-
+#load("tpm_metadata.RData")
 
 stop()
 
@@ -135,3 +138,4 @@ counts_voom  <- as.data.frame(counts_voom)
 save(metadata, counts_voom, file = here::here("../als_spinal_cord_browser/voom_metadata.RData"))
 
 # CHECK XIST AND SEX - WEIRD!
+

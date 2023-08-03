@@ -83,7 +83,8 @@ ui <- navbarPage(
             div(
                 p("Written by ", tags$a(href="https://jackhump.github.io", "Jack Humphrey.") ),
                 p("All data and metadata hosted on ", tags$a(href="https://zenodo.org/record/6385747", "Zenodo.")),
-                p("Preprint describing methods and results published on ", tags$a(href="https://www.medrxiv.org/content/10.1101/2021.08.31.21262682v1", "medRxiv.", target = "_blank")),
+                p("Manuscript published at ", tags$a(href="https://www.nature.com/articles/s41593-022-01205-3", "Nature Neuroscience.", target = "_blank")),
+                p("Preprint at ", tags$a(href="https://www.medrxiv.org/content/10.1101/2021.08.31.21262682v1", "medRxiv.", target = "_blank")),
                 p("Source code hosted on ", tags$a(href="https://github.com/jackhump/ALS_SpinalCord_QTLs/tree/master/als_spinal_cord_browser", "GitHub.", target = "_blank"),
                   " Please raise any feature suggestions or bugs as an issue.")
             )

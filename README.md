@@ -51,7 +51,7 @@ WGS QC pipeline hosted [here](https://github.com/jackhump/WGS-QC-Pipeline)
 
 ### Co-expression networks
 
-[Building co-expression networks, associations with traits and GO](https://jackhump.github.io/ALS_SpinalCord_QTLs/blob/master/scripts/ALS_WGCNA.Rmd)
+[Building co-expression networks, associations with traits and GO](https://jackhump.github.io/ALS_SpinalCord_QTLs/html/ALS_WGCNA.html)
 
 ### Quantitative Trait Loci (QTLs)
 

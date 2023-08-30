@@ -1,10 +1,12 @@
 ## ALS Spinal Cord differential expression and molecular QTLs
 
-Jack Humphrey 2019-2022
+Jack Humphrey 2019-2023
 
 ![deg figure](https://github.com/jackhump/ALS_SpinalCord_QTLs/raw/master/deg_figure.png)
 
 ## Manuscript
+
+[Publication in Nature Neuroscience](https://www.nature.com/articles/s41593-022-01205-3)
 
 [Link to preprint on medrxiv](https://www.medrxiv.org/content/10.1101/2021.08.31.21262682v1)
 
@@ -28,6 +30,7 @@ Whole genome sequencing data - dbGAP (in progress).
 
 [All TWAS weight files - Zenodo](https://zenodo.org/record/5256613)
 
+[All marker genes used](https://github.com/jackhump/ALS_SpinalCord_QTLs/tree/master/markers)
 
 ## Rmarkdown workbooks written for the project.
 
@@ -40,6 +43,8 @@ Workbooks are available as [RMarkdown files](https://github.com/jackhump/ALS_Spi
 WGS QC pipeline hosted [here](https://github.com/jackhump/WGS-QC-Pipeline)
 
 [Building sets of marker genes](https://github.com/jackhump/ALS_SpinalCord_QTLs/blob/master/scripts/ALS_marker_lists.Rmd)
+
+All marker sets are shared as RData objects [here](https://github.com/jackhump/ALS_SpinalCord_QTLs/tree/master/markers)
  
 ### Differential expression
 
